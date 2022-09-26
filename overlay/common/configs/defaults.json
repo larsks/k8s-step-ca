@@ -1,0 +1,6 @@
+{
+  "ca-config": "/home/step/config/ca.json",
+  "ca-url": "https://step-certificates.step-certificates.svc.cluster.local",
+  "fingerprint": "C3AFCDE8A955498CAD482689D28E27490E9038824EE79C6D295961AE6A2FCBAF",
+  "root": "/home/step/certs/root_ca.crt"
+}
