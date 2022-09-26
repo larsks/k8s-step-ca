@@ -1,0 +1,44 @@
+{
+  "address": ":9000",
+  "authority": {
+    "claims": {
+      "defaultHostSSHCertDuration": "720h",
+      "defaultTLSCertDuration": "24h",
+      "defaultUserSSHCertDuration": "24h",
+      "disableRenewal": false,
+      "maxHostSSHCertDuration": "1680h",
+      "maxTLSCertDuration": "24h",
+      "maxUserSSHCertDuration": "24h",
+      "minHostSSHCertDuration": "5m",
+      "minTLSCertDuration": "5m",
+      "minUserSSHCertDuration": "5m"
+    },
+    "provisioners": [
+    ],
+    "enableAdmin": true
+  },
+  "crt": "/home/step/certs/intermediate_ca.crt",
+  "db": {
+    "dataSource": "/home/step/db",
+    "type": "badgerv2"
+  },
+  "dnsNames": [
+    "ca.apps.infra.house",
+    "step-certificates.step-certificates.svc.cluster.local"
+  ],
+  "federateRoots": [],
+  "key": "/home/step/secrets/intermediate_ca_key",
+  "logger": {
+    "format": "json"
+  },
+  "root": "/home/step/certs/root_ca.crt",
+  "tls": {
+    "cipherSuites": [
+      "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+      "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"
+    ],
+    "maxVersion": 1.3,
+    "minVersion": 1.2,
+    "renegotiation": false
+  }
+}

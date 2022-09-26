@@ -1,0 +1,59 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-acme-provisioner
+spec:
+  backoffLimit: 100
+  ttlSecondsAfterFinished: 60
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: create-acme-provisioner
+        command:
+          - /bin/bash
+          - -c
+          - |
+            while ! step ca health; do
+              echo "waiting for ca"
+              sleep 1
+            done
+
+            if ! step ca provisioner list | grep -q '"name": "acme"'; then
+              step ca provisioner add acme --type ACME \
+                --admin-subject step \
+                --password-file /home/step/secrets/passwords/password \
+                --admin-provisioner "Admin JWK"
+            fi
+        image: cr.step.sm/smallstep/step-ca:0.22.1
+        volumeMounts:
+        - mountPath: /home/step/certs
+          name: certs
+          readOnly: true
+        - mountPath: /home/step/config
+          name: config
+          readOnly: true
+        - mountPath: /home/step/secrets
+          name: secrets
+          readOnly: true
+        - mountPath: /home/step/secrets/passwords
+          name: ca-password
+          readOnly: true
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        runAsUser: 1000
+      volumes:
+      - configMap:
+          name: step-certificates-certs
+        name: certs
+      - configMap:
+          name: step-certificates-config
+        name: config
+      - name: secrets
+        secret:
+          secretName: step-certificates-secrets
+      - name: ca-password
+        secret:
+          secretName: step-certificates-ca-password

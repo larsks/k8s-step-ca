@@ -1,0 +1,49 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: step-certificates
+
+commonLabels:
+  app.kubernetes.io/instance: house
+  app.kubernetes.io/name: step-certificates
+
+resources:
+- ../../base
+- externalsecrets/step-certificates-ca-password.yaml
+- externalsecrets/step-certificates-secrets.yaml
+- jobs/create-acme-provisioner.yaml
+
+patches:
+  # Remove secrets from base manifests (we will realize these via
+  # ExternalSecret resources).
+  - target:
+      kind: Secret
+      name: ".*"
+    patch: |
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: ignored
+
+configMapGenerator:
+  - name: step-certificates-certs
+    behavior: replace
+    namespace: step-certificates
+    files:
+      - certs/intermediate_ca.crt
+      - certs/root_ca.crt
+
+  - name: step-certificates-config
+    behavior: replace
+    namespace: step-certificates
+    files:
+      - configs/defaults.json
+      - configs/ssh.tpl
+      - configs/x509_leaf.tpl
+      - configs/ca.json
+
+# We need at least version 0.22 for the remote provisioner management
+# support (https://smallstep.com/docs/step-certificates/provisioners#remote-provisioner-management)
+images:
+  - name: cr.step.sm/smallstep/step-ca
+    newTag: 0.22.1
