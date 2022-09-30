@@ -6,6 +6,26 @@ metadata:
 spec:
   template:
     spec:
+      initContainers:
+        - name: config
+          image: docker.io/nginxinc/nginx-unprivileged:mainline
+          volumeMounts:
+          - mountPath: /home/step/config
+            name: config
+          - mountPath: /data
+            name: init-config
+            readOnly: true
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          command:
+            - bash
+            - -c
+            - |
+              cp /data/* /home/step/config
+              sed -i "s/POD_IP/$POD_IP/" /home/step/config/ca.json
       containers:
         - name: proxy
           image: docker.io/nginxinc/nginx-unprivileged:mainline
@@ -22,3 +42,9 @@ spec:
         - name: proxy-config
           configMap:
             name: proxy-config
+        - name: config
+          emptyDir: {}
+          configMap: null
+        - name: init-config
+          configMap:
+            name: step-certificates-config

@@ -25,7 +25,8 @@
   "dnsNames": [
     "ca.apps.infra.house",
     "step-certificates.step-certificates.svc.cluster.local",
-    "localhost"
+    "localhost",
+    "POD_IP"
   ],
   "federateRoots": [],
   "key": "/home/step/secrets/intermediate_ca_key",
