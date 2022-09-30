@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: step-certificates
+  namespace: step-certificates
+spec:
+  template:
+    spec:
+      containers:
+        - name: proxy
+          image: docker.io/nginxinc/nginx-unprivileged:mainline
+          ports:
+            - name: http
+              containerPort: 8000
+          volumeMounts:
+            - name: proxy-config
+              mountPath: /etc/nginx/conf.d
+            - name: certs
+              mountPath: /etc/nginx/certs
+              readOnly: true
+      volumes:
+        - name: proxy-config
+          configMap:
+            name: proxy-config

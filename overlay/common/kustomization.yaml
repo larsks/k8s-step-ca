@@ -11,8 +11,12 @@ resources:
 - externalsecrets/step-certificates-ca-password.yaml
 - externalsecrets/step-certificates-secrets.yaml
 - jobs/create-acme-provisioner.yaml
+- ingress.yaml
 
 patches:
+  - path: patches/statefulset_patch.yaml
+  - path: patches/service_patch.yaml
+
   # Remove secrets from base manifests (we will realize these via
   # ExternalSecret resources).
   - target:
@@ -27,20 +31,24 @@ patches:
 
 configMapGenerator:
   - name: step-certificates-certs
-    behavior: replace
     namespace: step-certificates
+    behavior: replace
     files:
       - certs/intermediate_ca.crt
       - certs/root_ca.crt
 
   - name: step-certificates-config
-    behavior: replace
     namespace: step-certificates
+    behavior: replace
     files:
       - configs/defaults.json
       - configs/ssh.tpl
       - configs/x509_leaf.tpl
       - configs/ca.json
+
+  - name: proxy-config
+    files:
+      - configs/default.conf
 
 # We need at least version 0.22 for the remote provisioner management
 # support (https://smallstep.com/docs/step-certificates/provisioners#remote-provisioner-management)

@@ -1,10 +1,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: public
+  name: step-certificates
   annotations:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/service.serversscheme: https
     traefik.ingress.kubernetes.io/router.tls.certresolver: incluster
 
 spec:
@@ -18,4 +17,4 @@ spec:
               service:
                 name:  step-certificates
                 port:
-                  number: 443
+                  name: http
