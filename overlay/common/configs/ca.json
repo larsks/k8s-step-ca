@@ -24,7 +24,8 @@
   },
   "dnsNames": [
     "ca.apps.infra.house",
-    "step-certificates.step-certificates.svc.cluster.local"
+    "step-certificates.step-certificates.svc.cluster.local",
+    "localhost"
   ],
   "federateRoots": [],
   "key": "/home/step/secrets/intermediate_ca_key",
