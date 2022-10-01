@@ -2,9 +2,11 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: create-acme-provisioner
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
 spec:
   backoffLimit: 100
-  ttlSecondsAfterFinished: 60
   template:
     spec:
       restartPolicy: Never
