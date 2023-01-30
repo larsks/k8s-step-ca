@@ -6,10 +6,10 @@ metadata:
   name: step-certificates-config
   namespace: step-certificates
   labels:
-    helm.sh/chart: step-certificates-1.18.2_20220324
+    helm.sh/chart: step-certificates-1.23.1
     app.kubernetes.io/name: step-certificates
-    app.kubernetes.io/instance: RELEASE-NAME
-    app.kubernetes.io/version: "0.18.2"
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "0.23.1"
     app.kubernetes.io/managed-by: Helm
 ---
 # Source: step-certificates/templates/secrets.yaml
@@ -60,10 +60,10 @@ metadata:
   name: step-certificates-config
   namespace: step-certificates
   labels:
-    helm.sh/chart: step-certificates-1.18.2_20220324
+    helm.sh/chart: step-certificates-1.23.1
     app.kubernetes.io/name: step-certificates
-    app.kubernetes.io/instance: RELEASE-NAME
-    app.kubernetes.io/version: "0.18.2"
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "0.23.1"
     app.kubernetes.io/managed-by: Helm
 data:
   ca.json: |
@@ -82,6 +82,7 @@ data:
           "minTLSCertDuration": "5m",
           "minUserSSHCertDuration": "5m"
         },
+        "enableAdmin": false,
         "provisioners": []
       },
       "crt": "/home/step/certs/intermediate_ca.crt",
@@ -143,10 +144,10 @@ metadata:
   name: step-certificates-certs
   namespace: step-certificates
   labels:
-    helm.sh/chart: step-certificates-1.18.2_20220324
+    helm.sh/chart: step-certificates-1.23.1
     app.kubernetes.io/name: step-certificates
-    app.kubernetes.io/instance: RELEASE-NAME
-    app.kubernetes.io/version: "0.18.2"
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "0.23.1"
     app.kubernetes.io/managed-by: Helm
 data:
   intermediate_ca.crt: |-
@@ -161,11 +162,11 @@ metadata:
   name: step-certificates-config
   namespace: step-certificates
   labels:
-    helm.sh/chart: step-certificates-1.18.2_20220324
+    helm.sh/chart: step-certificates-1.23.1
     app.kubernetes.io/name: step-certificates
-    app.kubernetes.io/instance: RELEASE-NAME
+    app.kubernetes.io/instance: release-name
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/version: 0.18.2
+    app.kubernetes.io/version: 0.23.1
 rules:
 - apiGroups: [""]
   resources: ["secrets", "configmaps"]
@@ -178,11 +179,11 @@ metadata:
   name: step-certificates-config
   namespace: step-certificates
   labels:
-    helm.sh/chart: step-certificates-1.18.2_20220324
+    helm.sh/chart: step-certificates-1.23.1
     app.kubernetes.io/name: step-certificates
-    app.kubernetes.io/instance: RELEASE-NAME
+    app.kubernetes.io/instance: release-name
     app.kubernetes.io/managed-by: Helm
-    app.kubernetes.io/version: 0.18.2
+    app.kubernetes.io/version: 0.23.1
 subjects:
 - kind: ServiceAccount
   name: step-certificates-config
@@ -199,10 +200,10 @@ metadata:
   name: step-certificates
   namespace: step-certificates
   labels:
-    helm.sh/chart: step-certificates-1.18.2_20220324
+    helm.sh/chart: step-certificates-1.23.1
     app.kubernetes.io/name: step-certificates
-    app.kubernetes.io/instance: RELEASE-NAME
-    app.kubernetes.io/version: "0.18.2"
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "0.23.1"
     app.kubernetes.io/managed-by: Helm
 spec:
   type: ClusterIP
@@ -213,7 +214,7 @@ spec:
       name: https
   selector:
     app.kubernetes.io/name: step-certificates
-    app.kubernetes.io/instance: RELEASE-NAME
+    app.kubernetes.io/instance: release-name
 ---
 # Source: step-certificates/templates/ca.yaml
 apiVersion: apps/v1
@@ -222,10 +223,10 @@ metadata:
   name: step-certificates
   namespace: step-certificates
   labels:
-    helm.sh/chart: step-certificates-1.18.2_20220324
+    helm.sh/chart: step-certificates-1.23.1
     app.kubernetes.io/name: step-certificates
-    app.kubernetes.io/instance: RELEASE-NAME
-    app.kubernetes.io/version: "0.18.2"
+    app.kubernetes.io/instance: release-name
+    app.kubernetes.io/version: "0.23.1"
     app.kubernetes.io/managed-by: Helm
 spec:
   # Only one replica is supported at this moment
@@ -233,15 +234,15 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: step-certificates
-      app.kubernetes.io/instance: RELEASE-NAME
+      app.kubernetes.io/instance: release-name
   serviceName: step-certificates
   template:
     metadata:
       labels:
         app.kubernetes.io/name: step-certificates
-        app.kubernetes.io/instance: RELEASE-NAME
+        app.kubernetes.io/instance: release-name
       annotations:
-        checksum/config: e7e006669b80610a3d5d770cae526d7926aa9e9f521c5b9501a0747d786bd421
+        checksum/config: 628c763a1bf070d1e24eb5c7c76fd39b24dad0147d2ee62ad983f9be01617d35
         checksum/secret: 873f6f62602b9732a77bfcdf15a1103c4f7e50e335556a3f66a75fc19f9c5189
     spec:
       securityContext:
@@ -251,7 +252,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: step-certificates
-          image: "cr.step.sm/smallstep/step-ca:0.18.2"
+          image: "cr.step.sm/smallstep/step-ca:0.23.1"
           imagePullPolicy: IfNotPresent
           command: [
             "/usr/local/bin/step-ca",
@@ -315,7 +316,7 @@ spec:
       name: database
       labels:
         app.kubernetes.io/name: step-certificates
-        app.kubernetes.io/instance: RELEASE-NAME
+        app.kubernetes.io/instance: release-name
         app.kubernetes.io/managed-by: Helm
     spec:
       accessModes:

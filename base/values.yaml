@@ -16,6 +16,7 @@ inject:
           type: badgerv2
           dataSource: /home/step/db
         authority:
+          enableAdmin: false
           provisioners: []
         tls:
           cipherSuites:

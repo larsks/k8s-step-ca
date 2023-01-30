@@ -27,7 +27,7 @@ spec:
                 --password-file /home/step/secrets/passwords/password \
                 --admin-provisioner "Admin JWK"
             fi
-        image: cr.step.sm/smallstep/step-ca:0.22.1
+        image: cr.step.sm/smallstep/step-ca:0.23.1
         volumeMounts:
         - mountPath: /home/step/certs
           name: certs

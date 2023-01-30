@@ -4,7 +4,6 @@ namespace: step-certificates
 
 commonLabels:
   app.kubernetes.io/instance: house
-  app.kubernetes.io/name: step-certificates
 
 resources:
 - ../../base

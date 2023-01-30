@@ -6,7 +6,7 @@ values.yaml.step1:
 		--provisioner-password-file <(echo secret) \
 		--password-file <(echo secret) \
 		--deployment-type standalone \
-		--name "House Apps CA" \
+		--name "Step CA" \
 		--address :9000 \
 		--dns localhost \
 		--provisioner to-be-removed  > $@ || { rm -f $@; exit 1; }
