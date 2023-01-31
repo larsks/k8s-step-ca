@@ -3,10 +3,13 @@ kind: Ingress
 metadata:
   name: step-certificates
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: websecure
-    traefik.ingress.kubernetes.io/router.tls.certresolver: incluster
-
+    kubernetes.io/ingress.class: "nginx"
+    cert-manager.io/cluster-issuer: "house"
 spec:
+  tls:
+    - hosts:
+        - ca.apps.infra.house
+      secretName: ca-cert
   rules:
     - host: ca.apps.infra.house
       http:
