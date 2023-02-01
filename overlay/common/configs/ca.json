@@ -17,7 +17,7 @@
     ],
     "enableAdmin": true
   },
-  "crt": "/home/step/certs/intermediate_ca.crt",
+  "crt": "/home/step/certs/intermediate-ca.crt",
   "db": {
     "dataSource": "/home/step/db",
     "type": "badgerv2"
@@ -28,11 +28,11 @@
     "localhost"
   ],
   "federateRoots": [],
-  "key": "/home/step/secrets/intermediate_ca_key",
+  "key": "/home/step/secrets/intermediate-ca.key",
   "logger": {
     "format": "json"
   },
-  "root": "/home/step/certs/root_ca.crt",
+  "root": "/home/step/certs/root-ca.crt",
   "tls": {
     "cipherSuites": [
       "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",

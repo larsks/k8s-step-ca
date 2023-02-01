@@ -33,8 +33,8 @@ configMapGenerator:
     namespace: step-certificates
     behavior: replace
     files:
-      - certs/intermediate_ca.crt
-      - certs/root_ca.crt
+      - certs/intermediate-ca.crt
+      - certs/root-ca.crt
 
   - name: step-certificates-config
     namespace: step-certificates
