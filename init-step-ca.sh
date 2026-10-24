@@ -5,6 +5,11 @@ if [[ -z "$STEP_PASSWORD_FILE" ]]; then
   exit 1
 fi
 
+if [[ -f /home/step/config/ca.json ]]; then
+  echo "CA already initialized, skipping step ca init" >&2
+  exit 0
+fi
+
 step_ca_init_args=(
   --deployment-type=standalone
   --name="${STEP_CA_NAME:-SmallStep}"

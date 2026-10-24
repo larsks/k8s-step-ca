@@ -8,6 +8,7 @@ resources:
   - deployment.yaml
   - pvc.yaml
   - service.yaml
+  - configure-job.yaml
 
 configMapGenerator:
   - name: step-scripts
@@ -15,6 +16,8 @@ configMapGenerator:
       disableNameSuffixHash: true
     files:
       - init-step-ca.sh
+      - configure-step-ca.sh
+      - idrac-rsa.tpl
 
   - name: step-config
     envs:

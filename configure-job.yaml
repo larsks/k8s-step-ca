@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: step-ca-configure
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      volumes:
+        - name: step-scripts
+          configMap:
+            name: step-scripts
+        - name: step-password
+          secret:
+            secretName: step-password
+        - name: step-root-certificate
+          secret:
+            secretName: step-root-certificate
+      containers:
+        - name: step-ca-configure
+          image: docker.io/smallstep/step-ca
+          command:
+            - bash
+            - /scripts/configure-step-ca.sh
+          volumeMounts:
+            - name: step-scripts
+              mountPath: /scripts
+            - name: step-password
+              mountPath: /step/password
+            - name: step-root-certificate
+              mountPath: /step/ca
+          envFrom:
+            - configMapRef:
+                name: step-config
+          env:
+            - name: STEP_PASSWORD_FILE
+              value: /step/password/STEP_PASSWORD
+            - name: STEP_ROOT_CERTIFICATE
+              value: /step/ca/tls.crt
