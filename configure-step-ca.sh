@@ -17,7 +17,8 @@ set -e
 admin_subject="${STEP_ADMIN_SUBJECT:-step}"
 admin_provisioner="${STEP_PROVISIONER_NAME:-admin}"
 idrac_provisioner="${STEP_IDRAC_PROVISIONER_NAME:-idrac}"
-server_provisioner="${STEP_SERVER_PROVISIONER_NAME:-server}"
+server_jwt_provisioner="${STEP_SERVER_JWT_PROVISIONER_NAME:-server-jwt}"
+server_x5c_provisioner="${STEP_SERVER_X5C_PROVISIONER_NAME:-server-x5c}"
 
 conn_flags=(--ca-url="$STEP_CA_URL" --root="$STEP_ROOT_CERTIFICATE")
 admin_auth=(
@@ -40,6 +41,28 @@ ensure_jwk_provisioner() {
   fi
 }
 
+ensure_x5c_provisioner() {
+  local name=$1
+  local roots=$2
+  if step ca provisioner list "${conn_flags[@]}" | grep -q "\"name\": *\"${name}\""; then
+    echo "provisioner '${name}' already exists, skipping" >&2
+  else
+    echo "adding provisioner '${name}'" >&2
+    step ca provisioner add "$name" \
+      --type=X5C \
+      --x5c-roots="$roots" \
+      "${admin_auth[@]}" "${conn_flags[@]}"
+  fi
+}
+
+remove_provisioner_if_present() {
+  local name=$1
+  if step ca provisioner list "${conn_flags[@]}" | grep -q "\"name\": *\"${name}\""; then
+    echo "removing superseded provisioner '${name}'" >&2
+    step ca provisioner remove "$name" "${admin_auth[@]}" "${conn_flags[@]}"
+  fi
+}
+
 echo "waiting for CA at $STEP_CA_URL to become healthy" >&2
 for _ in $(seq 1 60); do
   if step ca health "${conn_flags[@]}" >/dev/null 2>&1; then
@@ -56,10 +79,22 @@ step ca provisioner update "$idrac_provisioner" \
   --x509-template=/scripts/idrac-rsa.tpl \
   "${admin_auth[@]}" "${conn_flags[@]}"
 
-# "server" is for non-ACME devices/services that don't need the iDRAC
-# RSA-only restriction - no x509 template is applied, so key type is
-# unconstrained.
-ensure_jwk_provisioner "$server_provisioner"
+# "server-jwt"/"server-x5c" are for non-ACME devices/services that don't
+# need the iDRAC RSA-only restriction - no x509 template is applied, so
+# key type is unconstrained.
+#
+# server-jwt: JWK-authenticated, used to bootstrap a server's initial
+# certificate.
+# server-x5c: X5C-authenticated, used for subsequent reissuance (e.g. key
+# rotation, or a new duration) once a server already holds a cert issued
+# by this CA, authenticating with that cert instead of the shared JWK
+# password.
+#
+# "server-jwt" was previously named "server"; remove the old name so it
+# isn't left behind alongside the new one.
+remove_provisioner_if_present "server"
+ensure_jwk_provisioner "$server_jwt_provisioner"
+ensure_x5c_provisioner "$server_x5c_provisioner" "$STEP_ROOT_CERTIFICATE"
 
 # The authority-level x509 allow list is deny-by-default for any SAN type
 # it touches: once *any* dns entry is added, only listed names are

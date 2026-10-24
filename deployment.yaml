@@ -19,6 +19,9 @@ spec:
         - name: step-root-certificate
           secret:
             secretName: step-root-certificate
+        - name: step-intermediate-certificate
+          secret:
+            secretName: step-intermediate-certificate
       initContainers:
         - name: step-ca-init
           image: docker.io/smallstep/step-ca
@@ -31,6 +34,8 @@ spec:
               mountPath: /step/password
             - name: step-root-certificate
               mountPath: /step/ca
+            - name: step-intermediate-certificate
+              mountPath: /step/intermediate
           command:
             - bash
             - /scripts/init-step-ca.sh
@@ -46,6 +51,10 @@ spec:
               value: /step/ca/tls.key
             - name: STEP_CA_KEY_PASSWORD_FILE
               value: /step/ca/password
+            - name: STEP_CA_INTERMEDIATE_CERTIFICATE_FILE
+              value: /step/intermediate/tls.crt
+            - name: STEP_CA_INTERMEDIATE_KEY_FILE
+              value: /step/intermediate/tls.key
       containers:
         - name: step-ca
           image: docker.io/smallstep/step-ca
