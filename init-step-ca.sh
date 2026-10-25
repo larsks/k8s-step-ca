@@ -33,7 +33,7 @@ if [[ $STEP_REMOTE_MANAGEMENT = 1 ]]; then
 fi
 
 if [[ -n "$STEP_DNS_NAMES" ]]; then
-  mapfile -d, -t dns_names <<<"$STEP_DNS_NAMES"
+  IFS=',' read -r -a dns_names <<<"$STEP_DNS_NAMES"
   for name in "${dns_names[@]}"; do
     step_ca_init_args+=(
       --dns="$name"
