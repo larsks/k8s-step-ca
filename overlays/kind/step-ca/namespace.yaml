@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  # Stands in for an external secret store (e.g. a vault or password
+  # manager) in local/kind testing, so we exercise the SecretStore/
+  # ExternalSecret flow without a real external backend.
+  name: step-ca-secrets

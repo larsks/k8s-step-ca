@@ -3,10 +3,9 @@ kind: Service
 metadata:
   name: step-ca
 spec:
-  type: NodePort
+  type: ClusterIP
   ports:
     - name: api
       protocol: TCP
       port: 443
       targetPort: api
-      nodePort: 30443

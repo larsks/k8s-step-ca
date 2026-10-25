@@ -17,6 +17,13 @@ spec:
         - name: step-root-certificate
           secret:
             secretName: step-root-certificate
+            # Only the public cert is needed here (to verify step-ca's TLS
+            # identity over the admin API) - project just that key, not
+            # tls.key, so the root private key is never exposed to this
+            # routinely-run Job.
+            items:
+              - key: tls.crt
+                path: tls.crt
       containers:
         - name: step-ca-configure
           image: docker.io/smallstep/step-ca

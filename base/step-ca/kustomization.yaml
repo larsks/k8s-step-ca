@@ -1,14 +1,17 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
+namespace: step-ca
 labels:
   - pairs:
       app: step-ca
     includeSelectors: true
 resources:
+  - namespace.yaml
   - deployment.yaml
   - pvc.yaml
   - service.yaml
   - configure-job.yaml
+  - ingress.yaml
 
 configMapGenerator:
   - name: step-scripts
@@ -16,28 +19,15 @@ configMapGenerator:
       disableNameSuffixHash: true
     files:
       - init-step-ca.sh
+      - check-ca-initialized.sh
       - configure-step-ca.sh
       - idrac-rsa.tpl
 
   - name: step-config
+    options:
+      # init/job.yaml references this ConfigMap by name from a separate
+      # kustomize build, which only resolves if the name is stable rather
+      # than content-hashed.
+      disableNameSuffixHash: true
     envs:
       - step.env
-
-secretGenerator:
-  - name: step-password
-    literals:
-      - STEP_PASSWORD=supersecret
-
-  - name: step-root-certificate
-    type: kubernetes.io/tls
-    files:
-      - tls.crt=certs/root_ca.crt
-      - tls.key=certs/root_ca.key
-    literals:
-      - password=supersecret
-
-  - name: step-intermediate-certificate
-    type: kubernetes.io/tls
-    files:
-      - tls.crt=certs/intermediate_ca.crt
-      - tls.key=certs/intermediate_ca.key

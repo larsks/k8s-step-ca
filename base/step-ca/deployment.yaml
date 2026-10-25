@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: step-ca
+spec:
+  replicas: 1
+  template:
+    spec:
+      volumes:
+        - name: step-data
+          persistentVolumeClaim:
+            claimName: step-data
+        - name: step-scripts
+          configMap:
+            name: step-scripts
+        - name: step-password
+          secret:
+            secretName: step-password
+      initContainers:
+        - name: step-ca-init
+          image: docker.io/smallstep/step-ca
+          volumeMounts:
+            - name: step-data
+              mountPath: /home/step
+            - name: step-scripts
+              mountPath: /scripts
+          command:
+            - bash
+            - /scripts/check-ca-initialized.sh
+      containers:
+        - name: step-ca
+          image: docker.io/smallstep/step-ca
+          ports:
+            - containerPort: 9000
+              name: api
+          volumeMounts:
+            - name: step-data
+              mountPath: /home/step
+            - name: step-password
+              mountPath: /password
+          envFrom:
+            - configMapRef:
+                name: step-config

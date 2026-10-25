@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../../base/haproxy-ingress/
+
+patches:
+  # Kind has no load balancer; expose via NodePort so traffic flows through
+  # cluster.yaml's extraPortMappings (node:30080->host:9080, node:30443->host:9443).
+  - patch: |
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: haproxy-ingress
+        namespace: haproxy-ingress
+      spec:
+        type: NodePort
+        ports:
+          - port: 80
+            protocol: TCP
+            nodePort: 30080
+          - port: 443
+            protocol: TCP
+            nodePort: 30443

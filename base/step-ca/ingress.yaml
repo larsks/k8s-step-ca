@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: step-ca
+  annotations:
+    # step-ca terminates its own TLS and presents its own CA-issued cert;
+    # haproxy must forward the raw TLS stream by SNI rather than
+    # terminating and re-encrypting, or clients validating against the
+    # root/intermediate CA would see haproxy's cert instead.
+    haproxy-ingress.github.io/ssl-passthrough: "true"
+spec:
+  rules:
+    - host: ca.massopen.cloud
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: step-ca
+                port:
+                  name: api
