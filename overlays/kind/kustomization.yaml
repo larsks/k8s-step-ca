@@ -4,4 +4,4 @@ resources:
   - external-secrets/
   - haproxy-ingress/
   - metrics-server/
-  - step-ca/
+  - ../../base/step-ca
