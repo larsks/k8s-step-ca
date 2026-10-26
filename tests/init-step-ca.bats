@@ -401,7 +401,8 @@ EOF
 @test "ensure_server_ca generates and stores a complete secret when absent" {
   generate_test_root "$BATS_TEST_TMPDIR"
   run --separate-stderr ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
-    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password" \
+    "test-server-ca"
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "$BATS_TEST_TMPDIR/work/server_ca.crt" ]
   [ "${lines[1]}" = "$BATS_TEST_TMPDIR/work/server_ca.key" ]
@@ -415,7 +416,8 @@ EOF
 @test "ensure_server_ca encrypts the generated key with the generated password" {
   generate_test_root "$BATS_TEST_TMPDIR"
   run --separate-stderr ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
-    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password" \
+    "test-server-ca"
   [ "$status" -eq 0 ]
   local secret="$BATS_TEST_TMPDIR/secrets/step-server-ca"
   # Encrypted: no password, no key.
@@ -435,7 +437,8 @@ EOF
   echo "existing-key" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.key"
   echo -n "existing-password" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/password"
   run --separate-stderr ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
-    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password" \
+    "test-server-ca"
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "$BATS_TEST_TMPDIR/work/server_ca.crt" ]
   [ "${lines[1]}" = "$BATS_TEST_TMPDIR/work/server_ca.key" ]
@@ -457,7 +460,8 @@ EOF
   mkdir -p "$BATS_TEST_TMPDIR/secrets/step-server-ca"
   echo "existing-crt" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
   run --separate-stderr ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
-    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password" \
+    "test-server-ca"
   [ "$status" -ne 0 ]
   [[ "$stderr" == *"missing tls.crt, tls.key or password"* ]]
   run cat "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
@@ -469,7 +473,8 @@ EOF
   echo "existing-crt" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
   echo "existing-key" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.key"
   run --separate-stderr ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
-    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password" \
+    "test-server-ca"
   [ "$status" -ne 0 ]
   [[ "$stderr" == *"no password"* ]]
   run cat "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
@@ -479,7 +484,8 @@ EOF
 @test "ensure_server_ca fails without generating when the API lookup fails" {
   generate_test_root "$BATS_TEST_TMPDIR"
   FAKE_KUBECTL_GET_FAILS=1 run --separate-stderr ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
-    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password" \
+    "test-server-ca"
   [ "$status" -ne 0 ]
   run grep -c '^create' "$BATS_TEST_TMPDIR/kubectl.log"
   [ "$output" = "0" ]
@@ -505,7 +511,8 @@ EOF
     command step "$@"
   }
   run --separate-stderr ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
-    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password" \
+    "test-server-ca"
   [ "$status" -eq 0 ]
   run cat "$BATS_TEST_TMPDIR/work/server_ca.crt"
   [ "$output" = "winner-crt" ]
@@ -674,6 +681,27 @@ EOF
   [ "$status" -eq 0 ]
   [ -s "$BATS_TEST_TMPDIR/secrets/step-provisioner-server/password" ]
   [ -s "$BATS_TEST_TMPDIR/secrets/step-provisioner-idrac/password" ]
+}
+
+@test "main uses the default server CA name when STEP_SERVER_CA_NAME is unset" {
+  setup_main_env
+  run main
+  [ "$status" -eq 0 ]
+  run step certificate inspect --format json "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
+  [ "$status" -eq 0 ]
+  run jq -r '.subject.common_name[0]' <<<"$output"
+  [ "$output" = "SmallStep Server CA" ]
+}
+
+@test "main uses STEP_SERVER_CA_NAME for the generated intermediate's subject" {
+  setup_main_env
+  export STEP_SERVER_CA_NAME="Example Server CA"
+  run main
+  [ "$status" -eq 0 ]
+  run step certificate inspect --format json "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
+  [ "$status" -eq 0 ]
+  run jq -r '.subject.common_name[0]' <<<"$output"
+  [ "$output" = "Example Server CA" ]
 }
 
 @test "main removes its scratch workdir on exit" {

@@ -430,7 +430,8 @@ create_tls_secret() {
   local password_file="$6"
   local err rc
 
-  err="$(cat <<EOF | "$kubectl_bin" create -f - 2>&1 1>/dev/null
+  err="$(
+    cat <<EOF | "$kubectl_bin" create -f - 2>&1 1>/dev/null
 apiVersion: v1
 kind: Secret
 metadata:
@@ -474,7 +475,8 @@ create_opaque_secret() {
   local file="$5"
   local err rc
 
-  err="$(cat <<EOF | "$kubectl_bin" create -f - 2>&1 1>/dev/null
+  err="$(
+    cat <<EOF | "$kubectl_bin" create -f - 2>&1 1>/dev/null
 apiVersion: v1
 kind: Secret
 metadata:
@@ -498,6 +500,7 @@ EOF
 }
 
 # ensure_server_ca KUBECTL NAMESPACE WORKDIR ROOT_CRT ROOT_KEY ROOT_PASSWORD_FILE
+#   SERVER_CA_NAME
 #
 # Ensures a complete step-server-ca Secret (tls.crt, tls.key, password)
 # exists. If tls.crt or tls.key is missing, generates a new RSA
@@ -526,6 +529,7 @@ ensure_server_ca() {
   local root_crt="$4"
   local root_key="$5"
   local root_password_file="$6"
+  local server_ca_name="$7"
   local crt="$workdir/server_ca.crt"
   local key="$workdir/server_ca.key"
   local password_file="$workdir/server_ca_password"
@@ -555,7 +559,7 @@ ensure_server_ca() {
   fi
 
   step crypto rand 32 >"$password_file" || return 1
-  step certificate create "step-ca Server CA" "$crt" "$key" \
+  step certificate create "$server_ca_name" "$crt" "$key" \
     --profile intermediate-ca \
     --ca "$root_crt" --ca-key "$root_key" --ca-password-file "$root_password_file" \
     --kty RSA --size 2048 \
@@ -674,7 +678,8 @@ main() {
   local root_key="$root_ca_dir/tls.key"
   local root_password_file="$root_ca_dir/password"
   local namespace
-  local ca_name="${STEP_CA_NAME:-SmallStep}"
+  local ca_name="${STEP_CA_NAME:-SmallStep Root CA}"
+  local server_ca_name="${STEP_SERVER_CA_NAME:-SmallStep Server CA}"
   local dns_names="${STEP_DNS_NAMES:-}"
   local server_provisioner_name="${STEP_SERVER_PROVISIONER_NAME:-server}"
   local idrac_provisioner_name="${STEP_IDRAC_PROVISIONER_NAME:-idrac}"
@@ -730,7 +735,7 @@ main() {
   kubectl_bin="$(fetch_kubectl "$workdir")" || return 1
 
   server_ca_paths="$(ensure_server_ca "$kubectl_bin" "$namespace" "$workdir" \
-    "$root_crt" "$root_key" "$root_password_file")" || return 1
+    "$root_crt" "$root_key" "$root_password_file" "$server_ca_name")" || return 1
   {
     read -r server_ca_crt
     read -r server_ca_key
