@@ -85,6 +85,13 @@ run_step_ca_init() {
 
   cp "$server_ca_crt" "$config_dir/certs/intermediate_ca.crt" || return 1
   cp "$server_ca_key" "$config_dir/secrets/intermediate_ca_key" || return 1
+
+  # The step-ca server process (the smallstep/step-ca image's default
+  # command) is started as `step-ca --password-file
+  # /home/step/secrets/password /home/step/config/ca.json`, so it expects
+  # the provisioner/intermediate-key password at this canonical path on
+  # the persistent volume.
+  cp "$provisioner_password_file" "$config_dir/secrets/password" || return 1
 }
 
 # add_idrac_provisioner CA_CONFIG NAME PASSWORD_FILE TEMPLATE_PATH

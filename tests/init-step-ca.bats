@@ -110,6 +110,13 @@ init_test_ca() {
   [[ "$output" == *"rsaEncryption"* ]]
 }
 
+@test "run_step_ca_init copies the provisioner password to the canonical secrets/password path" {
+  init_test_ca
+  [ -f "$BATS_TEST_TMPDIR/config/secrets/password" ]
+  run diff "$BATS_TEST_TMPDIR/server_password" "$BATS_TEST_TMPDIR/config/secrets/password"
+  [ "$status" -eq 0 ]
+}
+
 @test "run_step_ca_init produces a ca.json with the requested sole provisioner" {
   init_test_ca
   run jq -r '.authority.provisioners[].name' "$BATS_TEST_TMPDIR/config/config/ca.json"
