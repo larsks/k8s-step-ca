@@ -370,20 +370,20 @@ EOF
   [ "$output" = "existing-password" ]
   run cat "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
   [ "$output" = "existing-crt" ]
-  run grep -c '^apply' "$BATS_TEST_TMPDIR/kubectl.log"
+  run grep -c '^create' "$BATS_TEST_TMPDIR/kubectl.log"
   [ "$output" = "0" ]
 }
 
-@test "ensure_server_ca regenerates when the secret exists but tls.key is missing" {
+@test "ensure_server_ca fails without overwriting when the secret exists but tls.key is missing" {
   generate_test_root "$BATS_TEST_TMPDIR"
   mkdir -p "$BATS_TEST_TMPDIR/secrets/step-server-ca"
   echo "existing-crt" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
   run --separate-stderr ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
     "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
-  [ "$status" -eq 0 ]
-  run openssl x509 -in "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt" -noout -subject
-  [[ "$output" == *"step-ca Server CA"* ]]
-  [ -s "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.key" ]
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"missing tls.crt, tls.key or password"* ]]
+  run cat "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
+  [ "$output" = "existing-crt" ]
 }
 
 @test "ensure_server_ca fails without overwriting when tls.crt/tls.key exist but password is missing" {
@@ -403,8 +403,38 @@ EOF
   FAKE_KUBECTL_GET_FAILS=1 run --separate-stderr ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
     "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
   [ "$status" -ne 0 ]
-  run grep -c '^apply' "$BATS_TEST_TMPDIR/kubectl.log"
+  run grep -c '^create' "$BATS_TEST_TMPDIR/kubectl.log"
   [ "$output" = "0" ]
+}
+
+@test "ensure_server_ca adopts the winner's material when it loses the create race" {
+  generate_test_root "$BATS_TEST_TMPDIR"
+  # Simulate another concurrently running init's create landing between
+  # our initial read (secret absent) and our own create call: by the
+  # time `step certificate create` would normally run, pre-seed the
+  # winner's complete secret so our subsequent create_tls_secret call
+  # collides with it, exactly as it would in the real race.
+  step() {
+    if [[ "$1" == "certificate" && "$2" == "create" ]]; then
+      mkdir -p "$BATS_TEST_TMPDIR/secrets/step-server-ca"
+      echo "winner-crt" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
+      echo "winner-key" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.key"
+      echo -n "winner-password" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/password"
+      echo "our-crt" >"$4"
+      echo "our-key" >"$5"
+      return 0
+    fi
+    command step "$@"
+  }
+  run --separate-stderr ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+  [ "$status" -eq 0 ]
+  run cat "$BATS_TEST_TMPDIR/work/server_ca.crt"
+  [ "$output" = "winner-crt" ]
+  run cat "$BATS_TEST_TMPDIR/work/server_ca.key"
+  [ "$output" = "winner-key" ]
+  run cat "$BATS_TEST_TMPDIR/work/server_ca_password"
+  [ "$output" = "winner-password" ]
 }
 
 @test "ensure_provisioner_password generates and stores a secret when absent" {
@@ -428,22 +458,43 @@ EOF
   [ "$output" = "existing-password" ]
 }
 
-@test "ensure_provisioner_password generates when the secret exists but has no password field" {
+@test "ensure_provisioner_password fails without overwriting when the secret exists but has no password field" {
   mkdir -p "$BATS_TEST_TMPDIR/secrets/step-provisioner-server"
   echo -n "something" >"$BATS_TEST_TMPDIR/secrets/step-provisioner-server/wrong-field"
   run --separate-stderr ensure_provisioner_password "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" server
-  [ "$status" -eq 0 ]
-  [ -s "$BATS_TEST_TMPDIR/secrets/step-provisioner-server/password" ]
-  run diff "$BATS_TEST_TMPDIR/secrets/step-provisioner-server/password" "$BATS_TEST_TMPDIR/work/server_password"
-  [ "$status" -eq 0 ]
+  [ "$status" -ne 0 ]
+  [[ "$stderr" == *"no password field"* ]]
+  run cat "$BATS_TEST_TMPDIR/secrets/step-provisioner-server/wrong-field"
+  [ "$output" = "something" ]
 }
 
 @test "ensure_provisioner_password fails without generating when the API lookup fails" {
   FAKE_KUBECTL_GET_FAILS=1 run --separate-stderr ensure_provisioner_password "$BATS_TEST_TMPDIR/bin/kubectl" step-ca \
     "$BATS_TEST_TMPDIR/work" server
   [ "$status" -ne 0 ]
-  run grep -c '^apply' "$BATS_TEST_TMPDIR/kubectl.log"
+  run grep -c '^create' "$BATS_TEST_TMPDIR/kubectl.log"
   [ "$output" = "0" ]
+}
+
+@test "ensure_provisioner_password adopts the winner's password when it loses the create race" {
+  # Simulate another concurrently running init's create landing between
+  # our initial read (secret absent) and our own create call: by the
+  # time `step crypto rand` would normally run, pre-seed the winner's
+  # password so our subsequent create_opaque_secret call collides with
+  # it, exactly as it would in the real race.
+  step() {
+    if [[ "$1" == "crypto" && "$2" == "rand" ]]; then
+      mkdir -p "$BATS_TEST_TMPDIR/secrets/step-provisioner-server"
+      echo -n "winner-password" >"$BATS_TEST_TMPDIR/secrets/step-provisioner-server/password"
+      echo -n "our-password"
+      return 0
+    fi
+    command step "$@"
+  }
+  run --separate-stderr ensure_provisioner_password "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" server
+  [ "$status" -eq 0 ]
+  run cat "$BATS_TEST_TMPDIR/work/server_password"
+  [ "$output" = "winner-password" ]
 }
 
 @test "fetch_kubectl downloads and verifies kubectl" {

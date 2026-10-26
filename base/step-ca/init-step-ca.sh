@@ -271,20 +271,31 @@ secret_field() {
   }
 }
 
-# apply_tls_secret KUBECTL NAMESPACE NAME CRT KEY PASSWORD_FILE
+# create_tls_secret KUBECTL NAMESPACE NAME CRT KEY PASSWORD_FILE
 #
-# Applies a kubernetes.io/tls Secret named NAME containing CRT/KEY as
+# Creates a kubernetes.io/tls Secret named NAME containing CRT/KEY as
 # tls.crt/tls.key, and the content of PASSWORD_FILE (the password KEY is
-# encrypted with) as password.
-apply_tls_secret() {
+# encrypted with) as password. Uses `kubectl create`, not `apply`: this is
+# the one-shot "generate it because it didn't exist a moment ago" path,
+# and only `create`'s atomicity lets a caller detect - rather than
+# silently overwrite - a Secret that a concurrently running init
+# generated first. Returns:
+#
+#   0 - created
+#   1 - the create failed for a reason other than already existing; a
+#       message is printed to stderr
+#   2 - NAME already exists (lost a race with another concurrently
+#       running init); nothing was changed
+create_tls_secret() {
   local kubectl_bin="$1"
   local namespace="$2"
   local name="$3"
   local crt="$4"
   local key="$5"
   local password_file="$6"
+  local err rc
 
-  cat <<EOF | "$kubectl_bin" apply -f -
+  err="$(cat <<EOF | "$kubectl_bin" create -f - 2>&1 1>/dev/null
 apiVersion: v1
 kind: Secret
 metadata:
@@ -296,20 +307,39 @@ data:
   tls.key: $(base64 -w0 <"$key")
   password: $(base64 -w0 <"$password_file")
 EOF
+  )"
+  rc=$?
+
+  if ((rc == 0)); then
+    return 0
+  elif [[ "$err" == *AlreadyExists* ]]; then
+    return 2
+  else
+    echo "$err" >&2
+    return 1
+  fi
 }
 
-# apply_opaque_secret KUBECTL NAMESPACE NAME FIELD FILE
+# create_opaque_secret KUBECTL NAMESPACE NAME FIELD FILE
 #
-# Applies an Opaque Secret named NAME containing a single FIELD key whose
-# value is the content of FILE.
-apply_opaque_secret() {
+# Creates an Opaque Secret named NAME containing a single FIELD key whose
+# value is the content of FILE. Uses `kubectl create`, not `apply`, for
+# the same race-detection reason as create_tls_secret. Returns:
+#
+#   0 - created
+#   1 - the create failed for a reason other than already existing; a
+#       message is printed to stderr
+#   2 - NAME already exists (lost a race with another concurrently
+#       running init); nothing was changed
+create_opaque_secret() {
   local kubectl_bin="$1"
   local namespace="$2"
   local name="$3"
   local field="$4"
   local file="$5"
+  local err rc
 
-  cat <<EOF | "$kubectl_bin" apply -f -
+  err="$(cat <<EOF | "$kubectl_bin" create -f - 2>&1 1>/dev/null
 apiVersion: v1
 kind: Secret
 metadata:
@@ -319,16 +349,36 @@ type: Opaque
 data:
   $field: $(base64 -w0 <"$file")
 EOF
+  )"
+  rc=$?
+
+  if ((rc == 0)); then
+    return 0
+  elif [[ "$err" == *AlreadyExists* ]]; then
+    return 2
+  else
+    echo "$err" >&2
+    return 1
+  fi
 }
 
 # ensure_server_ca KUBECTL NAMESPACE WORKDIR ROOT_CRT ROOT_KEY ROOT_PASSWORD_FILE
 #
 # Ensures a complete step-server-ca Secret (tls.crt, tls.key, password)
-# exists. If tls.crt or tls.key is missing, generates (and applies) a new
-# RSA intermediate signed by ROOT_CRT/ROOT_KEY, its key encrypted with a
-# freshly generated random password. If tls.crt and tls.key are present
-# but password is not, fails rather than overwriting what may be an
-# operator-supplied intermediate.
+# exists. If tls.crt or tls.key is missing, generates a new RSA
+# intermediate signed by ROOT_CRT/ROOT_KEY, its key encrypted with a
+# freshly generated random password, and creates the Secret. If tls.crt
+# and tls.key are present but password is not, fails rather than
+# overwriting what may be an operator-supplied intermediate.
+#
+# The create is atomic: if another concurrently running init already
+# created step-server-ca between this function's initial read and its
+# own create call, that create fails with AlreadyExists rather than
+# silently overwriting the winner's Secret, and this function adopts the
+# winner's material instead of its own, now-orphaned, generated one. This
+# is what keeps two concurrent inits (e.g. an old pod's initContainer
+# still finishing as its replacement starts) from leaving the Secret and
+# the locally assembled ca.json encrypted with two different passwords.
 #
 # Either way, writes the resolved certificate, key and key password to
 # WORKDIR and prints their paths, one per line, in that order - always
@@ -377,8 +427,34 @@ ensure_server_ca() {
     --password-file "$password_file" \
     --force >&2 || return 1
 
-  apply_tls_secret "$kubectl_bin" "$namespace" step-server-ca \
-    "$crt" "$key" "$password_file" >&2 || return 1
+  create_tls_secret "$kubectl_bin" "$namespace" step-server-ca "$crt" "$key" "$password_file"
+  case $? in
+  0) ;;
+  2)
+    # Something now has the name that didn't (or wasn't complete) at the
+    # read above. Re-check: a concurrently running init that just created
+    # a complete Secret is the race this is meant to catch - adopt its
+    # material instead of our own, now-orphaned, generated one. A Secret
+    # that's still incomplete isn't a race winner, it's a stale/broken
+    # object our own create can't safely absorb (create has no "fill in
+    # the missing fields" semantics, unlike apply) - fail instead of
+    # looping on it, same as the complete-but-no-password case above.
+    secret_field "$kubectl_bin" "$namespace" step-server-ca tls.crt >"$crt"
+    crt_rc=$?
+    secret_field "$kubectl_bin" "$namespace" step-server-ca tls.key >"$key"
+    key_rc=$?
+    secret_field "$kubectl_bin" "$namespace" step-server-ca password >"$password_file"
+    password_rc=$?
+    if ((crt_rc > 1 || key_rc > 1 || password_rc > 1)); then
+      return 1
+    elif ((crt_rc != 0 || key_rc != 0 || password_rc != 0)); then
+      echo "step-server-ca already exists but is missing tls.crt, tls.key or password -" \
+        "complete it, or delete the secret to regenerate it" >&2
+      return 1
+    fi
+    ;;
+  *) return 1 ;;
+  esac
 
   printf '%s\n' "$crt" "$key" "$password_file"
 }
@@ -386,10 +462,16 @@ ensure_server_ca() {
 # ensure_provisioner_password KUBECTL NAMESPACE WORKDIR NAME
 #
 # Ensures a step-provisioner-NAME Secret's "password" field exists,
-# generating (and applying) a random one if it's absent. Either way,
-# writes the resolved password to WORKDIR and prints that path - never a
-# volume mount, so the result reflects the Secret as it is in the API
-# right now.
+# generating a random one and creating the Secret if it's absent. Either
+# way, writes the resolved password to WORKDIR and prints that path -
+# never a volume mount, so the result reflects the Secret as it is in
+# the API right now.
+#
+# The create is atomic: if another concurrently running init already
+# created step-provisioner-NAME since the read above, that create fails
+# with AlreadyExists rather than silently overwriting the winner's
+# Secret, and this function adopts the winner's password instead of its
+# own, now-orphaned, generated one - see create_opaque_secret.
 ensure_provisioner_password() {
   local kubectl_bin="$1"
   local namespace="$2"
@@ -411,7 +493,29 @@ ensure_provisioner_password() {
   fi
 
   step crypto rand 32 >"$password_file" || return 1
-  apply_opaque_secret "$kubectl_bin" "$namespace" "$secret_name" password "$password_file" >&2 || return 1
+  create_opaque_secret "$kubectl_bin" "$namespace" "$secret_name" password "$password_file"
+  case $? in
+  0) ;;
+  2)
+    # Something now has this name that didn't at the read above. A
+    # concurrently running init that just created it with a password is
+    # the race this is meant to catch - adopt its password instead of
+    # our own, now-orphaned, generated one. A Secret that still has no
+    # password isn't a race winner, it's a stale/broken object our own
+    # create can't safely absorb (create has no "fill in the missing
+    # field" semantics, unlike apply) - fail instead of looping on it.
+    secret_field "$kubectl_bin" "$namespace" "$secret_name" password >"$password_file"
+    rc=$?
+    if ((rc > 1)); then
+      return 1
+    elif ((rc != 0)); then
+      echo "$secret_name already exists but has no password field -" \
+        "add one, or delete the secret to regenerate it" >&2
+      return 1
+    fi
+    ;;
+  *) return 1 ;;
+  esac
 
   echo "$password_file"
 }

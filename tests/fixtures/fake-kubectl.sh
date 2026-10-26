@@ -19,10 +19,14 @@
 #   --ignore-not-found is given, in which case it prints nothing and exits
 #   0. If $FAKE_KUBECTL_GET_FAILS is set, every `get` fails as if the API
 #   were unreachable.
-# - `apply -f -` reads a Secret manifest from stdin, in exactly the shape
-#   this script's own init-step-ca.sh produces (a top-level `metadata.name`
-#   and a top-level `data:` map of `key: base64value` pairs), and
-#   base64-decodes each value into $FAKE_KUBECTL_SECRETS_DIR/<name>/<key>.
+# - `apply -f -` and `create -f -` both read a Secret manifest from stdin,
+#   in exactly the shape this script's own init-step-ca.sh produces (a
+#   top-level `metadata.name` and a top-level `data:` map of
+#   `key: base64value` pairs), and base64-decode each value into
+#   $FAKE_KUBECTL_SECRETS_DIR/<name>/<key>. `create` additionally mirrors
+#   real kubectl's refusal to overwrite an existing secret: if the named
+#   secret's directory already exists, it prints an AlreadyExists error
+#   and exits 1 without touching anything, instead of writing the fields.
 #
 # Every invocation's arguments are appended to $FAKE_KUBECTL_LOG, if set.
 set -euo pipefail
@@ -91,8 +95,9 @@ get)
     exit 1
   fi
   ;;
-apply)
-  # apply -f -
+apply | create)
+  # apply -f - / create -f -
+  verb="$1"
   name=""
   in_data=0
   declare -A fields=()
@@ -119,11 +124,20 @@ apply)
     exit 1
   }
 
+  if [[ "$verb" == "create" && -d "$FAKE_KUBECTL_SECRETS_DIR/$name" ]]; then
+    echo "Error from server (AlreadyExists): error when creating \"STDIN\": secrets \"$name\" already exists" >&2
+    exit 1
+  fi
+
   mkdir -p "$FAKE_KUBECTL_SECRETS_DIR/$name"
   for key in "${!fields[@]}"; do
     printf '%s' "${fields[$key]}" | base64 -d >"$FAKE_KUBECTL_SECRETS_DIR/$name/$key"
   done
-  echo "secret/$name configured"
+  if [[ "$verb" == "create" ]]; then
+    echo "secret/$name created"
+  else
+    echo "secret/$name configured"
+  fi
   ;;
 *)
   echo "fake-kubectl: unsupported invocation: $*" >&2

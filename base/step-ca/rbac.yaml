@@ -4,12 +4,14 @@ metadata:
   name: step-ca
 rules:
   # The step-ca-init initContainer reads step-server-ca and the
-  # provisioner-password Secrets by name (get), and writes any that are
-  # missing with `kubectl apply`, which itself does a get followed by a
-  # create (new object) or patch (existing object). Nothing lists or
-  # updates Secrets.
+  # provisioner-password Secrets by name (get), and creates any that are
+  # missing with `kubectl create` - deliberately not `apply`, so that a
+  # Secret created by a concurrently running init (e.g. an old pod's
+  # initContainer still finishing as its replacement starts) is reported
+  # as a conflict instead of silently overwritten. Nothing lists,
+  # updates, or patches Secrets.
   #
-  # get/patch are limited to the Secrets the script manages. The
+  # get is limited to the Secrets the script manages. The
   # step-provisioner-* names must match STEP_SERVER_PROVISIONER_NAME and
   # STEP_IDRAC_PROVISIONER_NAME in step.env.
   - apiGroups: [""]
@@ -18,7 +20,7 @@ rules:
       - step-server-ca
       - step-provisioner-server
       - step-provisioner-idrac
-    verbs: ["get", "patch"]
+    verbs: ["get"]
   # create can't be restricted by resourceNames (the object doesn't exist
   # yet when it's authorized), so it is namespace-wide. Scoped to the
   # step-ca namespace only - this ServiceAccount has no access to Secrets

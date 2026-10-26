@@ -1,0 +1,11 @@
+# haproxy-ingress (installed by ./haproxy-ingress/) does not auto-default
+# ingressClassName on step-ca's Ingress, and the controller ignores
+# Ingress resources with no class reference - so this environment must
+# set it explicitly. Not set in base: an AWS/EKS overlay would use its
+# own, different ingress controller/class.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: step-ca
+spec:
+  ingressClassName: haproxy
