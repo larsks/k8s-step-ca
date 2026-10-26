@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: step-ca
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    # get: the step-ca-init initContainer checks whether step-server-ca and
+    # the provisioner-password Secrets already exist before generating
+    # them. create/update/patch: it writes those Secrets itself on first
+    # run. Scoped to the step-ca namespace only - this ServiceAccount has
+    # no access to Secrets anywhere else in the cluster.
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: step-ca
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: step-ca
+subjects:
+  - kind: ServiceAccount
+    name: step-ca
