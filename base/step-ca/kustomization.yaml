@@ -23,10 +23,5 @@ configMapGenerator:
       - idrac-rsa.tpl
 
   - name: step-config
-    options:
-      # init/job.yaml references this ConfigMap by name from a separate
-      # kustomize build, which only resolves if the name is stable rather
-      # than content-hashed.
-      disableNameSuffixHash: true
     envs:
       - step.env

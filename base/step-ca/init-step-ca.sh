@@ -30,7 +30,7 @@ apply_authority_policy() {
 
 # run_step_ca_init CONFIG_DIR CA_NAME DNS_NAMES PROVISIONER_NAME \
 #   PROVISIONER_PASSWORD_FILE ROOT_CRT ROOT_KEY ROOT_PASSWORD_FILE \
-#   SERVER_CA_CRT SERVER_CA_KEY
+#   SERVER_CA_CRT SERVER_CA_KEY SERVER_CA_PASSWORD_FILE
 #
 # Initializes a standalone step-ca PKI under CONFIG_DIR using the provided
 # root certificate/key, with PROVISIONER_NAME as the sole provisioner
@@ -51,6 +51,12 @@ apply_authority_policy() {
 # generated intermediate with the pre-built RSA intermediate given by
 # SERVER_CA_CRT/SERVER_CA_KEY (the officially documented way to bring your
 # own intermediate: https://smallstep.com/docs/tutorials/intermediate-ca-new-ca/).
+# SERVER_CA_KEY is encrypted with the password in SERVER_CA_PASSWORD_FILE.
+#
+# Any config/, certs/, secrets/ or templates/ left under CONFIG_DIR by an
+# earlier, interrupted run are removed first: `step ca init` refuses to
+# run non-interactively over an existing ca.json, and a partial run's
+# output is never trusted (see ca_already_initialized).
 run_step_ca_init() {
   local config_dir="$1"
   local ca_name="$2"
@@ -62,9 +68,13 @@ run_step_ca_init() {
   local root_password_file="$8"
   local server_ca_crt="$9"
   local server_ca_key="${10}"
+  local server_ca_password_file="${11}"
   local -a dns_args=()
   local -a dns_list=()
   local name
+
+  rm -rf "$config_dir/config" "$config_dir/certs" \
+    "$config_dir/secrets" "$config_dir/templates" || return 1
 
   IFS=',' read -r -a dns_list <<<"$dns_names"
   for name in "${dns_list[@]}"; do
@@ -85,13 +95,15 @@ run_step_ca_init() {
 
   cp "$server_ca_crt" "$config_dir/certs/intermediate_ca.crt" || return 1
   cp "$server_ca_key" "$config_dir/secrets/intermediate_ca_key" || return 1
+  chmod 0600 "$config_dir/secrets/intermediate_ca_key" || return 1
 
   # The step-ca server process (the smallstep/step-ca image's default
   # command) is started as `step-ca --password-file
-  # /home/step/secrets/password /home/step/config/ca.json`, so it expects
-  # the provisioner/intermediate-key password at this canonical path on
-  # the persistent volume.
-  cp "$provisioner_password_file" "$config_dir/secrets/password" || return 1
+  # /home/step/secrets/password /home/step/config/ca.json`, and uses that
+  # password to decrypt secrets/intermediate_ca_key - so this must be the
+  # server CA's key password, not the provisioner's.
+  cp "$server_ca_password_file" "$config_dir/secrets/password" || return 1
+  chmod 0600 "$config_dir/secrets/password" || return 1
 }
 
 # add_idrac_provisioner CA_CONFIG NAME PASSWORD_FILE TEMPLATE_PATH
@@ -131,76 +143,146 @@ add_acme_provisioner() {
     --ca-config="$ca_config" || return 1
 }
 
+# init_marker CONFIG_DIR
+#
+# Prints the path of the completion marker that main() writes as its very
+# last step, once every part of initialization has succeeded.
+init_marker() {
+  local config_dir="$1"
+
+  echo "$config_dir/config/.step-ca-initialized"
+}
+
 # ca_already_initialized CONFIG_DIR
 #
-# Returns 0 if a ca.json already exists under CONFIG_DIR (i.e. step ca
-# init has already run against this STEPPATH), 1 otherwise. Callers use
-# this to short-circuit before touching any secrets.
+# Returns 0 if a previous run of main() against CONFIG_DIR completed
+# successfully (its completion marker exists), 1 otherwise. Deliberately
+# not keyed off ca.json: `step ca init` writes ca.json early, so a run
+# that fails (or is killed) after that point leaves a ca.json behind that
+# is missing provisioners and/or policy. Without the marker, the next pod
+# start redoes initialization from scratch instead of serving that
+# half-built CA.
 ca_already_initialized() {
   local config_dir="$1"
 
-  [[ -f "$config_dir/config/ca.json" ]]
+  [[ -f "$(init_marker "$config_dir")" ]]
+}
+
+# root_is_rsa ROOT_CRT
+#
+# Returns 0 if the certificate at ROOT_CRT has an RSA public key, 1
+# otherwise (including if it can't be parsed). Dell iDRAC 8 requires every
+# certificate in its trust chain to be RSA.
+root_is_rsa() {
+  local root_crt="$1"
+  local inspected
+
+  inspected="$(step certificate inspect --format json "$root_crt")" || return 1
+  jq -e '.subject_key_info.key_algorithm.name == "RSA"' <<<"$inspected" >/dev/null
 }
 
 # fetch_kubectl WORKDIR
 #
-# Downloads the current stable `kubectl` release into WORKDIR and prints
-# its path. Mirrors bootstrap-ca.sh's install-into-workdir technique, but
-# never installs over a system binary: callers get back a path to use
-# directly, so this script never depends on (or risks colliding with) a
-# `kubectl` already on PATH.
+# Downloads the current stable `kubectl` release for this machine's
+# architecture into WORKDIR, verifies it against the sha256 checksum
+# published alongside it, and prints its path. Never installs over a
+# system binary: callers get back a path to use directly, so this script
+# never depends on (or risks colliding with) a `kubectl` already on PATH.
+#
+# The checksum is fetched from the same origin as the binary, so it
+# guards against truncated/corrupted downloads and error pages rather
+# than against a compromised dl.k8s.io.
 fetch_kubectl() {
   local workdir="$1"
-  local kubectl_version
   local kubectl_path="$workdir/kubectl"
+  local kubectl_version arch url expected actual
+
+  case "$(uname -m)" in
+  x86_64) arch=amd64 ;;
+  aarch64 | arm64) arch=arm64 ;;
+  *)
+    echo "fetch_kubectl: unsupported architecture $(uname -m)" >&2
+    return 1
+    ;;
+  esac
 
   mkdir -p "$workdir" || return 1
-  kubectl_version="$(curl -sL https://dl.k8s.io/release/stable.txt)" || return 1
-  curl -sLo "$kubectl_path" "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl" || return 1
+  kubectl_version="$(curl -fsSL https://dl.k8s.io/release/stable.txt)" || return 1
+  if [[ ! "$kubectl_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "fetch_kubectl: unexpected kubectl version string '$kubectl_version'" >&2
+    return 1
+  fi
+
+  url="https://dl.k8s.io/release/${kubectl_version}/bin/linux/${arch}/kubectl"
+  curl -fsSLo "$kubectl_path" "$url" || return 1
+  expected="$(curl -fsSL "$url.sha256")" || {
+    rm -f "$kubectl_path"
+    return 1
+  }
+  expected="${expected%%[[:space:]]*}"
+  actual="$(sha256sum "$kubectl_path")" || {
+    rm -f "$kubectl_path"
+    return 1
+  }
+  actual="${actual%% *}"
+
+  if [[ -z "$expected" || "$expected" != "$actual" ]]; then
+    echo "fetch_kubectl: sha256 mismatch for $url (expected '$expected', got '$actual')" >&2
+    rm -f "$kubectl_path"
+    return 1
+  fi
+
   chmod +x "$kubectl_path" || return 1
   echo "$kubectl_path"
 }
 
-# secret_field KUBECTL NAMESPACE SECRET FIELD WORKDIR
+# secret_field KUBECTL NAMESPACE SECRET FIELD
 #
 # Prints the decoded value of FIELD from SECRET in NAMESPACE, using
-# KUBECTL (a path to a kubectl binary). Returns non-zero if the secret or
-# the field doesn't exist, without printing anything.
+# KUBECTL (a path to a kubectl binary). Returns:
+#
+#   0 - FIELD is present and non-empty; its decoded value is printed
+#   1 - SECRET doesn't exist, or exists without a non-empty FIELD
+#   2 - the lookup itself failed (API/auth error) or FIELD isn't valid
+#       base64; a message is printed to stderr
+#
+# The template prints nothing (rather than `<no value>`, as a bare
+# `{{index .data "FIELD"}}` does) when .data or FIELD is missing, and
+# --ignore-not-found makes a missing secret print nothing and exit 0, so
+# every "absent" case is an empty result and any non-zero kubectl exit is
+# a genuine error rather than "not found".
 secret_field() {
   local kubectl_bin="$1"
   local namespace="$2"
   local secret="$3"
   local field="$4"
-  local workdir="$5"
-  local encoded_file
+  local encoded
 
-  mkdir -p "$workdir" || return 1
-  encoded_file="$(mktemp "$workdir/secret_field.XXXXXX")" || return 1
+  encoded="$("$kubectl_bin" -n "$namespace" get secret "$secret" --ignore-not-found \
+    -o go-template="{{with .data}}{{with index . \"$field\"}}{{.}}{{end}}{{end}}")" || {
+    echo "failed to look up secret $secret in namespace $namespace" >&2
+    return 2
+  }
+  [[ -n "$encoded" ]] || return 1
 
-  if ! "$kubectl_bin" -n "$namespace" get secret "$secret" \
-    -o go-template="{{index .data \"$field\"}}" >"$encoded_file" 2>/dev/null; then
-    rm -f "$encoded_file"
-    return 1
-  fi
-  if [[ ! -s "$encoded_file" ]]; then
-    rm -f "$encoded_file"
-    return 1
-  fi
-
-  base64 -d <"$encoded_file"
-  rm -f "$encoded_file"
+  base64 -d <<<"$encoded" || {
+    echo "field $field of secret $secret is not valid base64" >&2
+    return 2
+  }
 }
 
-# apply_tls_secret KUBECTL NAMESPACE NAME CRT KEY
+# apply_tls_secret KUBECTL NAMESPACE NAME CRT KEY PASSWORD_FILE
 #
 # Applies a kubernetes.io/tls Secret named NAME containing CRT/KEY as
-# tls.crt/tls.key.
+# tls.crt/tls.key, and the content of PASSWORD_FILE (the password KEY is
+# encrypted with) as password.
 apply_tls_secret() {
   local kubectl_bin="$1"
   local namespace="$2"
   local name="$3"
   local crt="$4"
   local key="$5"
+  local password_file="$6"
 
   cat <<EOF | "$kubectl_bin" apply -f -
 apiVersion: v1
@@ -212,6 +294,7 @@ type: kubernetes.io/tls
 data:
   tls.crt: $(base64 -w0 <"$crt")
   tls.key: $(base64 -w0 <"$key")
+  password: $(base64 -w0 <"$password_file")
 EOF
 }
 
@@ -240,12 +323,17 @@ EOF
 
 # ensure_server_ca KUBECTL NAMESPACE WORKDIR ROOT_CRT ROOT_KEY ROOT_PASSWORD_FILE
 #
-# Ensures a step-server-ca Secret exists, generating (and applying) an
-# unencrypted RSA intermediate signed by ROOT_CRT/ROOT_KEY if it's
-# absent. Either way, prints "CRT_PATH:KEY_PATH" for the caller to pass
-# straight to run_step_ca_init: newly generated material under WORKDIR,
-# or the well-known mount point of the optional step-server-ca Secret
-# volume (see base/step-ca/deployment.yaml) if it already exists.
+# Ensures a complete step-server-ca Secret (tls.crt, tls.key, password)
+# exists. If tls.crt or tls.key is missing, generates (and applies) a new
+# RSA intermediate signed by ROOT_CRT/ROOT_KEY, its key encrypted with a
+# freshly generated random password. If tls.crt and tls.key are present
+# but password is not, fails rather than overwriting what may be an
+# operator-supplied intermediate.
+#
+# Either way, writes the resolved certificate, key and key password to
+# WORKDIR and prints their paths, one per line, in that order - always
+# WORKDIR paths, never a volume mount, so the result reflects the Secret
+# as it is in the API right now.
 ensure_server_ca() {
   local kubectl_bin="$1"
   local namespace="$2"
@@ -253,67 +341,91 @@ ensure_server_ca() {
   local root_crt="$4"
   local root_key="$5"
   local root_password_file="$6"
-  local mounted_crt="/step/server-ca/tls.crt"
-  local mounted_key="/step/server-ca/tls.key"
+  local crt="$workdir/server_ca.crt"
+  local key="$workdir/server_ca.key"
+  local password_file="$workdir/server_ca_password"
+  local crt_rc key_rc password_rc
 
   mkdir -p "$workdir" || return 1
 
-  if secret_field "$kubectl_bin" "$namespace" step-server-ca tls.crt "$workdir" >/dev/null; then
-    echo "$mounted_crt:$mounted_key"
+  secret_field "$kubectl_bin" "$namespace" step-server-ca tls.crt >"$crt"
+  crt_rc=$?
+  secret_field "$kubectl_bin" "$namespace" step-server-ca tls.key >"$key"
+  key_rc=$?
+  secret_field "$kubectl_bin" "$namespace" step-server-ca password >"$password_file"
+  password_rc=$?
+
+  if ((crt_rc > 1 || key_rc > 1 || password_rc > 1)); then
+    return 1
+  fi
+
+  if ((crt_rc == 0 && key_rc == 0)); then
+    if ((password_rc != 0)); then
+      echo "step-server-ca has tls.crt and tls.key but no password -" \
+        "add the key's password to the secret, or delete the secret to regenerate it" >&2
+      return 1
+    fi
+    printf '%s\n' "$crt" "$key" "$password_file"
     return 0
   fi
 
-  step certificate create "step-ca Server CA" \
-    "$workdir/server_ca.crt" "$workdir/server_ca.key" \
+  step crypto rand 32 >"$password_file" || return 1
+  step certificate create "step-ca Server CA" "$crt" "$key" \
     --profile intermediate-ca \
     --ca "$root_crt" --ca-key "$root_key" --ca-password-file "$root_password_file" \
     --kty RSA --size 2048 \
-    --no-password --insecure \
-    --force || return 1
+    --password-file "$password_file" \
+    --force >&2 || return 1
 
   apply_tls_secret "$kubectl_bin" "$namespace" step-server-ca \
-    "$workdir/server_ca.crt" "$workdir/server_ca.key" || return 1
+    "$crt" "$key" "$password_file" >&2 || return 1
 
-  echo "$workdir/server_ca.crt:$workdir/server_ca.key"
+  printf '%s\n' "$crt" "$key" "$password_file"
 }
 
-# ensure_provisioner_password KUBECTL NAMESPACE WORKDIR NAME MOUNTED_PASSWORD_PATH
+# ensure_provisioner_password KUBECTL NAMESPACE WORKDIR NAME
 #
 # Ensures a step-provisioner-NAME Secret's "password" field exists,
-# generating (and applying) a random one if it's absent. Prints the path
-# to use: newly generated material under WORKDIR, or MOUNTED_PASSWORD_PATH
-# (the caller-supplied mount point of the optional Secret volume) if the
-# secret already exists.
+# generating (and applying) a random one if it's absent. Either way,
+# writes the resolved password to WORKDIR and prints that path - never a
+# volume mount, so the result reflects the Secret as it is in the API
+# right now.
 ensure_provisioner_password() {
   local kubectl_bin="$1"
   local namespace="$2"
   local workdir="$3"
   local name="$4"
-  local mounted_password_path="$5"
   local secret_name="step-provisioner-$name"
   local password_file="$workdir/${name}_password"
+  local rc
 
   mkdir -p "$workdir" || return 1
 
-  if secret_field "$kubectl_bin" "$namespace" "$secret_name" password "$workdir" >/dev/null; then
-    echo "$mounted_password_path"
+  secret_field "$kubectl_bin" "$namespace" "$secret_name" password >"$password_file"
+  rc=$?
+  if ((rc == 0)); then
+    echo "$password_file"
     return 0
+  elif ((rc > 1)); then
+    return 1
   fi
 
   step crypto rand 32 >"$password_file" || return 1
-  apply_opaque_secret "$kubectl_bin" "$namespace" "$secret_name" password "$password_file" || return 1
+  apply_opaque_secret "$kubectl_bin" "$namespace" "$secret_name" password "$password_file" >&2 || return 1
 
   echo "$password_file"
 }
 
 # main
 #
-# Entry point for the step-ca-init initContainer. Short-circuits if
-# ca.json already exists (never regenerates/overwrites secrets on a
+# Entry point for the step-ca-init initContainer. Short-circuits if a
+# previous run completed (never regenerates/overwrites secrets on a
 # re-run); otherwise resolves the operator-supplied step-root-ca material,
 # ensures the step-server-ca and provisioner-password secrets exist
 # (generating them on first run), and assembles ca.json: step ca init,
-# the idrac/acme provisioners, and the authority policy/claims.
+# the idrac/acme provisioners, and the authority policy/claims. Only once
+# all of that has succeeded does it write the completion marker; a run
+# that fails part-way is retried in full on the next pod start.
 main() {
   local config_dir="${STEP_CONFIG_DIR:-/home/step}"
   local ca_config="$config_dir/config/ca.json"
@@ -330,53 +442,77 @@ main() {
   local allow_dns="${STEP_POLICY_ALLOW_DNS:-}"
   local allow_ip="${STEP_POLICY_ALLOW_IP:-}"
   local default_duration="${STEP_DEFAULT_CERT_DURATION:-2160h}"
+  local marker
   local idrac_template_path
   local workdir
   local kubectl_bin
-  local server_ca_paths server_ca_crt server_ca_key
+  local server_ca_paths server_ca_crt server_ca_key server_ca_password_file
   local server_password_path idrac_password_path
 
+  marker="$(init_marker "$config_dir")"
+
   if ca_already_initialized "$config_dir"; then
-    echo "ca.json already exists at $ca_config - skipping initialization" >&2
+    echo "step-ca already initialized ($marker exists) - skipping initialization" >&2
     return 0
+  fi
+
+  if [[ -f "$ca_config" ]]; then
+    echo "$ca_config exists but $marker does not - a previous initialization" \
+      "did not complete; re-initializing from scratch" >&2
   fi
 
   # Checked before requiring NAMESPACE or fetching kubectl: an operator
   # restoring step-root-ca is the thing this failure is actually about,
   # and we want the message about that to win over any other missing
   # prerequisite.
-  if [[ ! -f "$root_key" ]] || [[ ! -f "$root_password_file" ]]; then
-    echo "step-root-ca secret is missing tls.key or password at $root_ca_dir -" \
+  if [[ ! -f "$root_crt" ]] || [[ ! -f "$root_key" ]] || [[ ! -f "$root_password_file" ]]; then
+    echo "step-root-ca secret is missing tls.crt, tls.key or password at $root_ca_dir -" \
       "restore step-root-ca from backup before retrying" >&2
+    return 1
+  fi
+
+  if ! root_is_rsa "$root_crt"; then
+    echo "step-root-ca tls.crt at $root_crt is not an RSA certificate -" \
+      "Dell iDRAC 8 requires an all-RSA trust chain, so step-root-ca must be RSA" >&2
     return 1
   fi
 
   namespace="${NAMESPACE:?NAMESPACE is required}"
 
   workdir="$(mktemp -d)" || return 1
+  # Expanded now rather than when the trap fires: workdir is local to
+  # main, and out of scope by the time the script exits.
+  # shellcheck disable=SC2064
+  trap "rm -rf $(printf '%q' "$workdir")" EXIT
+
   kubectl_bin="$(fetch_kubectl "$workdir")" || return 1
 
   server_ca_paths="$(ensure_server_ca "$kubectl_bin" "$namespace" "$workdir" \
     "$root_crt" "$root_key" "$root_password_file")" || return 1
-  server_ca_crt="${server_ca_paths%%:*}"
-  server_ca_key="${server_ca_paths##*:}"
+  {
+    read -r server_ca_crt
+    read -r server_ca_key
+    read -r server_ca_password_file
+  } <<<"$server_ca_paths"
 
   server_password_path="$(ensure_provisioner_password "$kubectl_bin" "$namespace" "$workdir" \
-    "$server_provisioner_name" "/step/provisioner-$server_provisioner_name/password")" || return 1
+    "$server_provisioner_name")" || return 1
   idrac_password_path="$(ensure_provisioner_password "$kubectl_bin" "$namespace" "$workdir" \
-    "$idrac_provisioner_name" "/step/provisioner-$idrac_provisioner_name/password")" || return 1
+    "$idrac_provisioner_name")" || return 1
 
   idrac_template_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/idrac-rsa.tpl"
 
   run_step_ca_init "$config_dir" "$ca_name" "$dns_names" "$server_provisioner_name" \
     "$server_password_path" \
     "$root_crt" "$root_key" "$root_password_file" \
-    "$server_ca_crt" "$server_ca_key" || return 1
+    "$server_ca_crt" "$server_ca_key" "$server_ca_password_file" || return 1
 
   add_idrac_provisioner "$ca_config" "$idrac_provisioner_name" \
     "$idrac_password_path" "$idrac_template_path" || return 1
   add_acme_provisioner "$ca_config" "$acme_provisioner_name" || return 1
   apply_authority_policy "$ca_config" "$allow_dns" "$allow_ip" "$default_duration" || return 1
+
+  touch "$marker" || return 1
 }
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

@@ -3,14 +3,29 @@ kind: Role
 metadata:
   name: step-ca
 rules:
+  # The step-ca-init initContainer reads step-server-ca and the
+  # provisioner-password Secrets by name (get), and writes any that are
+  # missing with `kubectl apply`, which itself does a get followed by a
+  # create (new object) or patch (existing object). Nothing lists or
+  # updates Secrets.
+  #
+  # get/patch are limited to the Secrets the script manages. The
+  # step-provisioner-* names must match STEP_SERVER_PROVISIONER_NAME and
+  # STEP_IDRAC_PROVISIONER_NAME in step.env.
   - apiGroups: [""]
     resources: ["secrets"]
-    # get/list: the step-ca-init initContainer checks whether step-server-ca
-    # and the provisioner-password Secrets already exist before generating
-    # them. create/update/patch: it writes those Secrets itself on first
-    # run. Scoped to the step-ca namespace only - this ServiceAccount has
-    # no access to Secrets anywhere else in the cluster.
-    verbs: ["get", "list", "create", "update", "patch"]
+    resourceNames:
+      - step-server-ca
+      - step-provisioner-server
+      - step-provisioner-idrac
+    verbs: ["get", "patch"]
+  # create can't be restricted by resourceNames (the object doesn't exist
+  # yet when it's authorized), so it is namespace-wide. Scoped to the
+  # step-ca namespace only - this ServiceAccount has no access to Secrets
+  # anywhere else in the cluster.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
