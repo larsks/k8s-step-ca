@@ -1,6 +1,29 @@
 setup() {
   load_fixture_ca_json
+  setup_fake_kubectl
   source "$BATS_TEST_DIRNAME/../base/step-ca/init-step-ca.sh"
+}
+
+setup_fake_kubectl() {
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  cp "$BATS_TEST_DIRNAME/fixtures/fake-kubectl.sh" "$BATS_TEST_TMPDIR/bin/kubectl"
+  chmod +x "$BATS_TEST_TMPDIR/bin/kubectl"
+  export FAKE_KUBECTL_SECRETS_DIR="$BATS_TEST_TMPDIR/secrets"
+  export FAKE_KUBECTL_LOG="$BATS_TEST_TMPDIR/kubectl.log"
+  mkdir -p "$FAKE_KUBECTL_SECRETS_DIR"
+}
+
+# generate_test_root: writes a password-protected RSA root key/cert to
+# $BATS_TEST_TMPDIR, for tests that only need a root (not a pre-built
+# intermediate) - i.e. ensure_server_ca, which builds its own
+# intermediate from this root.
+generate_test_root() {
+  local dir="$1"
+  echo -n "rootpass" >"$dir/root_password"
+  step certificate create "Test Root CA" \
+    "$dir/root_ca.crt" "$dir/root_ca.key" \
+    --profile root-ca --kty=RSA --size=2048 \
+    --password-file "$dir/root_password" >/dev/null
 }
 
 load_fixture_ca_json() {
@@ -117,3 +140,101 @@ init_test_ca() {
     "$BATS_TEST_TMPDIR/config/config/ca.json"
   [ "$status" -eq 0 ]
 }
+
+@test "ca_already_initialized returns false when ca.json is absent" {
+  run ca_already_initialized "$BATS_TEST_TMPDIR/config"
+  [ "$status" -ne 0 ]
+}
+
+@test "ca_already_initialized returns true when ca.json is present" {
+  mkdir -p "$BATS_TEST_TMPDIR/config/config"
+  touch "$BATS_TEST_TMPDIR/config/config/ca.json"
+  run ca_already_initialized "$BATS_TEST_TMPDIR/config"
+  [ "$status" -eq 0 ]
+}
+
+@test "secret_field returns non-zero when the secret is absent" {
+  run secret_field "$BATS_TEST_TMPDIR/bin/kubectl" step-ca step-server-ca tls.crt "$BATS_TEST_TMPDIR/work"
+  [ "$status" -ne 0 ]
+}
+
+@test "secret_field prints the decoded field when present" {
+  mkdir -p "$BATS_TEST_TMPDIR/secrets/step-server-ca"
+  printf 'hello world' >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
+  run secret_field "$BATS_TEST_TMPDIR/bin/kubectl" step-ca step-server-ca tls.crt "$BATS_TEST_TMPDIR/work"
+  [ "$status" -eq 0 ]
+  [ "$output" = "hello world" ]
+}
+
+@test "ensure_server_ca generates and stores a secret when absent" {
+  generate_test_root "$BATS_TEST_TMPDIR" # writes root_ca.crt/key/password
+  run ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt" ]
+  [ -f "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.key" ]
+}
+
+@test "ensure_server_ca does not overwrite an existing secret" {
+  mkdir -p "$BATS_TEST_TMPDIR/secrets/step-server-ca"
+  echo "existing" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
+  echo "existing" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.key"
+  run ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+  [ "$status" -eq 0 ]
+  run cat "$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
+  [ "$output" = "existing" ]
+}
+
+@test "ensure_server_ca prints the mounted path when the secret already exists" {
+  mkdir -p "$BATS_TEST_TMPDIR/secrets/step-server-ca"
+  echo "existing" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.crt"
+  echo "existing" >"$BATS_TEST_TMPDIR/secrets/step-server-ca/tls.key"
+  run ensure_server_ca "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
+    "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root_ca.key" "$BATS_TEST_TMPDIR/root_password"
+  [ "$output" = "/step/server-ca/tls.crt:/step/server-ca/tls.key" ]
+}
+
+@test "ensure_provisioner_password generates and stores a secret when absent" {
+  run ensure_provisioner_password "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
+    server "/step/provisioner-server/password"
+  [ "$status" -eq 0 ]
+  [ -f "$BATS_TEST_TMPDIR/secrets/step-provisioner-server/password" ]
+  [ "$output" != "/step/provisioner-server/password" ]
+}
+
+@test "ensure_provisioner_password does not overwrite an existing secret and prints the mounted path" {
+  mkdir -p "$BATS_TEST_TMPDIR/secrets/step-provisioner-server"
+  echo -n "existing-password" >"$BATS_TEST_TMPDIR/secrets/step-provisioner-server/password"
+  run ensure_provisioner_password "$BATS_TEST_TMPDIR/bin/kubectl" step-ca "$BATS_TEST_TMPDIR/work" \
+    server "/step/provisioner-server/password"
+  [ "$status" -eq 0 ]
+  [ "$output" = "/step/provisioner-server/password" ]
+  run cat "$BATS_TEST_TMPDIR/secrets/step-provisioner-server/password"
+  [ "$output" = "existing-password" ]
+}
+
+@test "main exits 0 immediately when ca.json already exists, without touching secrets" {
+  mkdir -p "$BATS_TEST_TMPDIR/config/config"
+  touch "$BATS_TEST_TMPDIR/config/config/ca.json"
+  STEP_CONFIG_DIR="$BATS_TEST_TMPDIR/config" run main
+  [ "$status" -eq 0 ]
+  [ ! -f "$BATS_TEST_TMPDIR/kubectl.log" ]
+}
+
+@test "main fails with a clear message when ca.json is missing and the root key is unavailable" {
+  mkdir -p "$BATS_TEST_TMPDIR/config"
+  mkdir -p "$BATS_TEST_TMPDIR/root-ca"
+  echo "cert-only" >"$BATS_TEST_TMPDIR/root-ca/tls.crt" # tls.key/password deliberately absent
+  STEP_CONFIG_DIR="$BATS_TEST_TMPDIR/config" STEP_ROOT_CA_DIR="$BATS_TEST_TMPDIR/root-ca" run main
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"restore"*"step-root-ca"* ]]
+  [ ! -f "$BATS_TEST_TMPDIR/kubectl.log" ]
+}
+
+# Note: main()'s full happy path (past the root-key check) also calls
+# fetch_kubectl, which downloads a real kubectl binary from the network -
+# so it isn't exercised end-to-end here. ensure_server_ca,
+# ensure_provisioner_password, run_step_ca_init, add_idrac_provisioner,
+# add_acme_provisioner, and apply_authority_policy are each covered
+# individually above against the fake kubectl and real step/jq/openssl.
