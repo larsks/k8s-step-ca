@@ -201,6 +201,17 @@ git commit -m "Assemble provisioners and RSA intermediate in step-ca init script
 
 **Files:**
 - Modify: `base/step-ca/init-step-ca.sh`
+- Create: `tests/fixtures/fake-kubectl.sh` — a stub `kubectl` for the bats
+  tests below. Must support exactly the invocations `ensure_server_ca`/
+  `ensure_provisioner_password` make: `get secret <name> -o go-template=...`
+  (reads from a flat `$FAKE_KUBECTL_SECRETS_DIR/<name>/<key>` layout,
+  base64-encoded, matching real `kubectl`'s `-o go-template` output, or
+  exits non-zero if the file is absent) and `apply -f -` (reads the
+  manifest from stdin, extracts `metadata.name` and each `data.<key>` via
+  `jq`/`yq` or a minimal parser, base64-decodes each value, and writes it
+  to `$FAKE_KUBECTL_SECRETS_DIR/<name>/<key>`). Also appends every
+  invocation's arguments to `$FAKE_KUBECTL_LOG` if that env var is set, for
+  the "main exits 0... without touching secrets" test's assertion.
 
 **Interfaces:**
 - Consumes: `run_step_ca_init`, `add_idrac_provisioner`, `add_acme_provisioner`, `apply_authority_policy` (Tasks 1-2).
@@ -212,15 +223,34 @@ git commit -m "Assemble provisioners and RSA intermediate in step-ca init script
   - `ensure_provisioner_password(kubectl, namespace, workdir, name, mounted_password_path)` — same generate-if-absent pattern for a single `step-provisioner-<name>` secret's `password` field; prints the path to use.
   - `main()` — the whole flow: exit 0 immediately if `ca_already_initialized`; otherwise fetch kubectl, resolve the root cert/key/password paths from `$STEP_ROOT_CA_DIR` (mounted `step-root-ca` secret, default `/step/root-ca`), failing with a clear message naming `step-root-ca` and telling the operator to restore `tls.key`/`password` if they are missing (see Review Focus), call `ensure_server_ca`, call `ensure_provisioner_password` for `server` and `idrac`, call `run_step_ca_init`, `add_idrac_provisioner`, `add_acme_provisioner`, `apply_authority_policy`, in that order. Reads `$STEP_CONFIG_DIR` (default `/home/step`) for where `ca.json` lives.
 
+    `main()` is also the only place that reads the rest of the env var
+    contract and forwards each value as the matching function argument
+    (Task 4 wires these as container env vars; Task 3 just needs to read
+    them with these exact names/defaults): `NAMESPACE` (no default,
+    required — passed as the `namespace` argument to `ensure_server_ca`/
+    `ensure_provisioner_password`), `STEP_CA_NAME` (default `SmallStep`,
+    passed as `run_step_ca_init`'s `ca_name`), `STEP_DNS_NAMES`
+    (comma-separated, passed as `dns_names`), `STEP_SERVER_PROVISIONER_NAME`
+    (default `server`, passed as `provisioner_name` to `run_step_ca_init`
+    and as `name` to the `server` call of `ensure_provisioner_password`),
+    `STEP_IDRAC_PROVISIONER_NAME` (default `idrac`, passed as `name` to
+    both `ensure_provisioner_password` and `add_idrac_provisioner`),
+    `STEP_ACME_PROVISIONER_NAME` (default `acme`, passed as `name` to
+    `add_acme_provisioner`), `STEP_POLICY_ALLOW_DNS` and
+    `STEP_POLICY_ALLOW_IP` (passed to `apply_authority_policy` as
+    `allow_dns`/`allow_ip`), and `STEP_DEFAULT_CERT_DURATION` (default
+    `2160h`, passed as `apply_authority_policy`'s `default_duration`).
+
 - [ ] **Step 1: Write the failing bats tests, stubbing `kubectl`**
 
 ```bash
 setup() {
   mkdir -p "$BATS_TEST_TMPDIR/bin"
-  # fake kubectl: records every invocation to $BATS_TEST_TMPDIR/kubectl.log,
-  # and serves/creates secrets from a flat dir $BATS_TEST_TMPDIR/secrets/<name>/<key>
   cp "$BATS_TEST_DIRNAME/fixtures/fake-kubectl.sh" "$BATS_TEST_TMPDIR/bin/kubectl"
   chmod +x "$BATS_TEST_TMPDIR/bin/kubectl"
+  export FAKE_KUBECTL_SECRETS_DIR="$BATS_TEST_TMPDIR/secrets"
+  export FAKE_KUBECTL_LOG="$BATS_TEST_TMPDIR/kubectl.log"
+  mkdir -p "$FAKE_KUBECTL_SECRETS_DIR"
   source "$BATS_TEST_DIRNAME/../base/step-ca/init-step-ca.sh"
 }
 
