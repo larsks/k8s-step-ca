@@ -137,33 +137,104 @@ EOF
   source "$BATS_TEST_DIRNAME/../base/step-ca/init-step-ca.sh"
 }
 
-@test "apply_authority_policy sets dns and ip allow lists" {
-  apply_authority_policy "$BATS_TEST_TMPDIR/ca.json" '*.massopen.cloud' '10.0.0.0/8' '2160h'
-  run jq -r '.authority.policy.x509.allow.dns[0]' "$BATS_TEST_TMPDIR/ca.json"
-  [ "$output" = '*.massopen.cloud' ]
-  run jq -r '.authority.policy.x509.allow.ip[0]' "$BATS_TEST_TMPDIR/ca.json"
-  [ "$output" = '10.0.0.0/8' ]
-}
-
-@test "apply_authority_policy sets default cert duration" {
-  apply_authority_policy "$BATS_TEST_TMPDIR/ca.json" '*.massopen.cloud' '10.0.0.0/8' '2160h'
+@test "set_default_cert_duration sets default cert duration" {
+  set_default_cert_duration "$BATS_TEST_TMPDIR/ca.json" '2160h'
   run jq -r '.authority.claims.defaultTLSCertDuration' "$BATS_TEST_TMPDIR/ca.json"
   [ "$output" = '2160h' ]
 }
 
-@test "apply_authority_policy is idempotent when re-run" {
-  apply_authority_policy "$BATS_TEST_TMPDIR/ca.json" '*.massopen.cloud' '10.0.0.0/8' '2160h'
-  apply_authority_policy "$BATS_TEST_TMPDIR/ca.json" '*.massopen.cloud' '10.0.0.0/8' '2160h'
-  run jq -r '.authority.policy.x509.allow.dns | length' "$BATS_TEST_TMPDIR/ca.json"
-  [ "$output" = '1' ]
-  run jq -r '.authority.policy.x509.allow.ip | length' "$BATS_TEST_TMPDIR/ca.json"
-  [ "$output" = '1' ]
+@test "set_default_cert_duration is idempotent when re-run" {
+  set_default_cert_duration "$BATS_TEST_TMPDIR/ca.json" '2160h'
+  set_default_cert_duration "$BATS_TEST_TMPDIR/ca.json" '2160h'
+  run jq -r '.authority.claims.defaultTLSCertDuration' "$BATS_TEST_TMPDIR/ca.json"
+  [ "$output" = '2160h' ]
 }
 
-@test "apply_authority_policy preserves unrelated ca.json keys" {
-  apply_authority_policy "$BATS_TEST_TMPDIR/ca.json" '*.massopen.cloud' '10.0.0.0/8' '2160h'
+@test "set_default_cert_duration preserves unrelated ca.json keys" {
+  set_default_cert_duration "$BATS_TEST_TMPDIR/ca.json" '2160h'
   run jq -r '.root' "$BATS_TEST_TMPDIR/ca.json"
   [ "$output" = '/home/step/certs/root_ca.crt' ]
+}
+
+@test "dns_allow_suffixes strips a leading wildcard from each entry" {
+  run dns_allow_suffixes '*.massopen.cloud,*.net.massopen.cloud'
+  [ "$status" -eq 0 ]
+  run jq -c . <<<"$output"
+  [ "$output" = '[".massopen.cloud",".net.massopen.cloud"]' ]
+}
+
+@test "dns_allow_suffixes passes through an entry without a leading wildcard" {
+  run dns_allow_suffixes 'ipv6-literal.net'
+  [ "$status" -eq 0 ]
+  run jq -c . <<<"$output"
+  [ "$output" = '["ipv6-literal.net"]' ]
+}
+
+@test "dns_allow_suffixes returns an empty array for an empty input" {
+  run dns_allow_suffixes ''
+  [ "$status" -eq 0 ]
+  run jq -c . <<<"$output"
+  [ "$output" = '[]' ]
+}
+
+@test "ip_allow_prefixes converts octet-aligned CIDRs to dotted prefixes" {
+  run ip_allow_prefixes '10.0.0.0/8,192.168.1.0/24,192.168.0.0/16,10.2.10.22/32'
+  [ "$status" -eq 0 ]
+  run jq -c . <<<"$output"
+  [ "$output" = '["10.","192.168.1.","192.168.","10.2.10.22"]' ]
+}
+
+@test "ip_allow_prefixes passes through an entry with no slash verbatim" {
+  run ip_allow_prefixes 'fe80:'
+  [ "$status" -eq 0 ]
+  run jq -c . <<<"$output"
+  [ "$output" = '["fe80:"]' ]
+}
+
+@test "ip_allow_prefixes fails on an unsupported CIDR mask" {
+  run ip_allow_prefixes '10.0.0.0/12'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unsupported CIDR mask"* ]]
+}
+
+@test "csv_to_json_array converts a comma-separated list verbatim" {
+  run csv_to_json_array 'RSA,ECDSA'
+  [ "$status" -eq 0 ]
+  run jq -c . <<<"$output"
+  [ "$output" = '["RSA","ECDSA"]' ]
+}
+
+@test "csv_to_json_array returns an empty array for an empty input" {
+  run csv_to_json_array ''
+  [ "$status" -eq 0 ]
+  run jq -c . <<<"$output"
+  [ "$output" = '[]' ]
+}
+
+@test "build_x509_template_data writes the AllowDNSSuffixes/AllowIPPrefixes/AllowedKeyTypes object" {
+  build_x509_template_data '*.massopen.cloud' '10.0.0.0/8' 'RSA' "$BATS_TEST_TMPDIR/template-data.json"
+  run jq -c . "$BATS_TEST_TMPDIR/template-data.json"
+  [ "$output" = '{"AllowDNSSuffixes":[".massopen.cloud"],"AllowIPPrefixes":["10."],"AllowedKeyTypes":["RSA"]}' ]
+}
+
+@test "build_x509_template_data leaves AllowedKeyTypes empty when none are given" {
+  build_x509_template_data '*.massopen.cloud' '10.0.0.0/8' '' "$BATS_TEST_TMPDIR/template-data.json"
+  run jq -c '.AllowedKeyTypes' "$BATS_TEST_TMPDIR/template-data.json"
+  [ "$output" = '[]' ]
+}
+
+@test "attach_x509_template records the template and template data on the provisioner" {
+  init_test_ca
+  echo '{"AllowDNSSuffixes":[".massopen.cloud"],"AllowIPPrefixes":["10."],"AllowedKeyTypes":[]}' \
+    >"$BATS_TEST_TMPDIR/template-data.json"
+  attach_x509_template "$BATS_TEST_TMPDIR/config/config/ca.json" server \
+    "$BATS_TEST_DIRNAME/../base/step-ca/x509-filter.tpl" "$BATS_TEST_TMPDIR/template-data.json"
+  run jq -r '.authority.provisioners[] | select(.name == "server") | .options.x509.template' \
+    "$BATS_TEST_TMPDIR/config/config/ca.json"
+  [[ "$output" == *"AllowDNSSuffixes"* ]]
+  run jq -r '.authority.provisioners[] | select(.name == "server") | .options.x509.templateData' \
+    "$BATS_TEST_TMPDIR/config/config/ca.json"
+  [[ "$output" == *".massopen.cloud"* ]]
 }
 
 @test "run_step_ca_init produces ca.json with an RSA intermediate" {
@@ -209,21 +280,28 @@ EOF
   [ "$output" = "server" ]
 }
 
-@test "add_idrac_provisioner adds a JWK provisioner with the RSA-only template" {
+@test "add_idrac_provisioner adds a JWK provisioner with the shared x509 template" {
   init_test_ca
   echo -n "idracpass" >"$BATS_TEST_TMPDIR/idrac_password"
+  echo '{"AllowDNSSuffixes":[".massopen.cloud"],"AllowIPPrefixes":["10."],"AllowedKeyTypes":["RSA"]}' \
+    >"$BATS_TEST_TMPDIR/template-data.json"
   add_idrac_provisioner "$BATS_TEST_TMPDIR/config/config/ca.json" idrac \
-    "$BATS_TEST_TMPDIR/idrac_password" "$BATS_TEST_DIRNAME/../base/step-ca/idrac-rsa.tpl"
+    "$BATS_TEST_TMPDIR/idrac_password" "$BATS_TEST_DIRNAME/../base/step-ca/x509-filter.tpl" \
+    "$BATS_TEST_TMPDIR/template-data.json"
   run jq -e '.authority.provisioners[] | select(.name == "idrac" and .type == "JWK")' \
     "$BATS_TEST_TMPDIR/config/config/ca.json"
   [ "$status" -eq 0 ]
   # `step ca provisioner update --x509-template` inlines the template's
   # contents into .options.x509.template; the step CLI has no mechanism to
   # instead record a templateFile path. Assert on the content it actually
-  # writes.
+  # writes. The RSA-only restriction itself lives in templateData, not the
+  # template.
   run jq -r '.authority.provisioners[] | select(.name == "idrac") | .options.x509.template' \
     "$BATS_TEST_TMPDIR/config/config/ca.json"
-  [[ "$output" == *"iDRAC devices do not support EC/Ed25519"* ]]
+  [[ "$output" == *"AllowedKeyTypes"* ]]
+  run jq -c '.authority.provisioners[] | select(.name == "idrac") | .options.x509.templateData' \
+    "$BATS_TEST_TMPDIR/config/config/ca.json"
+  [ "$output" = '{"AllowDNSSuffixes":[".massopen.cloud"],"AllowIPPrefixes":["10."],"AllowedKeyTypes":["RSA"]}' ]
 }
 
 @test "add_acme_provisioner adds an ACME provisioner" {
@@ -574,8 +652,17 @@ EOF
   [ -f "$(init_marker "$config")" ]
   run jq -r '[.authority.provisioners[].name] | join(",")' "$config/config/ca.json"
   [ "$output" = "server,idrac,acme" ]
-  run jq -r '.authority.policy.x509.allow.dns[0]' "$config/config/ca.json"
-  [ "$output" = '*.example.com' ]
+  # Both the server and idrac provisioners get the shared SAN-filtering
+  # template, parameterized with the same allow-list data; no
+  # authority-level policy is set (see set_default_cert_duration).
+  run jq -r '.authority.provisioners[] | select(.name == "server") | .options.x509.templateData' \
+    "$config/config/ca.json"
+  [[ "$output" == *".example.com"* ]]
+  run jq -r '.authority.provisioners[] | select(.name == "idrac") | .options.x509.templateData' \
+    "$config/config/ca.json"
+  [[ "$output" == *".example.com"* ]]
+  run jq -r '.authority.policy' "$config/config/ca.json"
+  [ "$output" = 'null' ]
   # The server's startup password decrypts the RSA intermediate it loads,
   # and both match what was stored in step-server-ca.
   run openssl rsa -in "$config/secrets/intermediate_ca_key" \
@@ -617,8 +704,9 @@ EOF
   [ -f "$(init_marker "$config")" ]
   run jq -r '[.authority.provisioners[].name] | join(",")' "$config/config/ca.json"
   [ "$output" = "server,idrac,acme" ]
-  run jq -e '.authority.policy.x509.allow.ip[0] == "10.0.0.0/8"' "$config/config/ca.json"
-  [ "$status" -eq 0 ]
+  run jq -r '.authority.provisioners[] | select(.name == "server") | .options.x509.templateData' \
+    "$config/config/ca.json"
+  [[ "$output" == *"10."* ]]
 }
 
 @test "main reuses secrets generated by an earlier failed attempt" {

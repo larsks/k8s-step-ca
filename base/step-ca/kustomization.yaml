@@ -20,7 +20,7 @@ configMapGenerator:
       disableNameSuffixHash: true
     files:
       - init-step-ca.sh
-      - idrac-rsa.tpl
+      - x509-filter.tpl
 
   - name: step-config
     envs:

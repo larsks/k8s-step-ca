@@ -1,31 +1,164 @@
 #!/bin/bash
 
-# apply_authority_policy CA_CONFIG ALLOW_DNS ALLOW_IP DEFAULT_DURATION
+# set_default_cert_duration CA_CONFIG DEFAULT_DURATION
 #
-# Sets the authority-level SAN allow lists and default TLS certificate
-# duration in the ca.json at CA_CONFIG. Keys are assigned, not appended,
-# so re-running produces the same result.
-apply_authority_policy() {
+# Sets the default TLS certificate duration in the ca.json at CA_CONFIG.
+# Keys are assigned, not appended, so re-running produces the same result.
+#
+# SAN restrictions are deliberately NOT handled here (nor anywhere at
+# authority.policy): self-hosted step-ca only supports policy at the
+# authority level, applying to every provisioner, and the policy engine
+# has no wildcard that matches a bare single-label DNS name. BMCs like
+# Lenovo XCC unconditionally embed their own bare hostname as a SAN in
+# any CSR they generate, which a policy-based allow list can never admit
+# - and since "all names in a request must be allowed or the request is
+# rejected", one such device poisons every signing request, including
+# ones that would otherwise be fine. SAN filtering is done per-provisioner
+# instead, via the x509 template attached by attach_x509_template (see
+# x509-filter.tpl); key-type restrictions (e.g. iDRAC's RSA-only
+# requirement) are injected the same way, as template data.
+set_default_cert_duration() {
   local ca_config="$1"
-  local allow_dns="$2"
-  local allow_ip="$3"
-  local default_duration="$4"
+  local default_duration="$2"
   local tmp
 
   tmp="$(mktemp "${ca_config}.XXXXXX")" || return 1
   if jq \
-    --arg dns "$allow_dns" \
-    --arg ip "$allow_ip" \
     --arg duration "$default_duration" \
-    '.authority.policy.x509.allow.dns = [$dns]
-     | .authority.policy.x509.allow.ip = [$ip]
-     | .authority.claims.defaultTLSCertDuration = $duration' \
+    '.authority.claims.defaultTLSCertDuration = $duration' \
     "$ca_config" >"$tmp"; then
     mv "$tmp" "$ca_config"
   else
     rm -f "$tmp"
     return 1
   fi
+}
+
+# dns_allow_suffixes ALLOW_DNS
+#
+# Converts a comma-separated list of DNS allow patterns (e.g.
+# "*.massopen.cloud,*.net.massopen.cloud") into a JSON array of suffixes
+# for the shared x509 templates' SAN filter, which keeps a DNS SAN when it
+# has one of these as a (Sprig `hasSuffix`) suffix. A leading "*" is
+# stripped from each pattern; entries without a leading "*" are used
+# as-is, so e.g. "ipv6-literal.net" would also match "evilipv6-literal.net"
+# - prefer "*."-prefixed patterns unless that looseness is intentional.
+dns_allow_suffixes() {
+  local allow_dns="$1"
+  local pattern
+  local json="[]"
+
+  IFS=',' read -ra patterns <<<"$allow_dns"
+  for pattern in "${patterns[@]}"; do
+    [[ -n "$pattern" ]] || continue
+    pattern="${pattern#\*}"
+    json="$(jq --arg s "$pattern" '. + [$s]' <<<"$json")" || return 1
+  done
+  echo "$json"
+}
+
+# ip_allow_prefixes ALLOW_IP
+#
+# Converts a comma-separated list of IP allow entries into a JSON array of
+# string prefixes for the shared x509 templates' SAN filter, which keeps
+# an IP SAN when it has one of these as a (Sprig `hasPrefix`) prefix.
+# Octet-aligned IPv4 CIDRs (/8, /16, /24, /32) are converted to their
+# dotted-decimal prefix (e.g. "10.0.0.0/8" -> "10."); an entry with no "/"
+# is used verbatim as a literal prefix (e.g. "fe80:" for IPv6 link-local
+# addresses). Templates have no general netmask arithmetic available, so
+# any other CIDR form is an error rather than a silently-wrong prefix.
+ip_allow_prefixes() {
+  local allow_ip="$1"
+  local entry prefix mask a b c d
+  local json="[]"
+
+  IFS=',' read -ra entries <<<"$allow_ip"
+  for entry in "${entries[@]}"; do
+    [[ -n "$entry" ]] || continue
+    if [[ "$entry" != */* ]]; then
+      prefix="$entry"
+    else
+      mask="${entry#*/}"
+      IFS='.' read -r a b c d <<<"${entry%/*}"
+      case "$mask" in
+      8) prefix="$a." ;;
+      16) prefix="$a.$b." ;;
+      24) prefix="$a.$b.$c." ;;
+      32) prefix="$a.$b.$c.$d" ;;
+      *)
+        echo "ip_allow_prefixes: unsupported CIDR mask /$mask in '$entry' -" \
+          "only /8, /16, /24 and /32 IPv4 CIDRs are auto-converted;" \
+          "pass a bare prefix (e.g. 'fe80:') for other ranges" >&2
+        return 1
+        ;;
+      esac
+    fi
+    json="$(jq --arg s "$prefix" '. + [$s]' <<<"$json")" || return 1
+  done
+  echo "$json"
+}
+
+# csv_to_json_array CSV
+#
+# Converts a comma-separated list into a JSON array of strings, with no
+# other transformation. Used for values the shared x509 template compares
+# with plain equality, e.g. AllowedKeyTypes.
+csv_to_json_array() {
+  local csv="$1"
+  local item
+  local json="[]"
+
+  IFS=',' read -ra items <<<"$csv"
+  for item in "${items[@]}"; do
+    [[ -n "$item" ]] || continue
+    json="$(jq --arg s "$item" '. + [$s]' <<<"$json")" || return 1
+  done
+  echo "$json"
+}
+
+# build_x509_template_data ALLOW_DNS ALLOW_IP ALLOWED_KEY_TYPES OUT_FILE
+#
+# Writes {"AllowDNSSuffixes": [...], "AllowIPPrefixes": [...],
+# "AllowedKeyTypes": [...]} to OUT_FILE, for use as the
+# --x509-template-data of the shared x509-filter.tpl template (see
+# attach_x509_template). ALLOWED_KEY_TYPES is a comma-separated list of
+# "RSA", "ECDSA" and/or "Ed25519"; an empty list means any key type is
+# allowed - unlike the SAN lists, where an empty list means no SAN of that
+# type is allowed, since an unset key-type restriction should mean "don't
+# restrict" rather than "reject everything".
+build_x509_template_data() {
+  local allow_dns="$1"
+  local allow_ip="$2"
+  local allowed_key_types="$3"
+  local out_file="$4"
+  local dns_json ip_json key_types_json
+
+  dns_json="$(dns_allow_suffixes "$allow_dns")" || return 1
+  ip_json="$(ip_allow_prefixes "$allow_ip")" || return 1
+  key_types_json="$(csv_to_json_array "$allowed_key_types")" || return 1
+
+  jq -n --argjson dns "$dns_json" --argjson ip "$ip_json" --argjson keyTypes "$key_types_json" \
+    '{AllowDNSSuffixes: $dns, AllowIPPrefixes: $ip, AllowedKeyTypes: $keyTypes}' >"$out_file"
+}
+
+# attach_x509_template CA_CONFIG NAME TEMPLATE_PATH TEMPLATE_DATA_PATH
+#
+# Attaches the x509 certificate template at TEMPLATE_PATH, and the
+# template data at TEMPLATE_DATA_PATH (see build_sans_template_data), to
+# the existing provisioner NAME in the ca.json at CA_CONFIG.
+attach_x509_template() {
+  local ca_config="$1"
+  local name="$2"
+  local template_path="$3"
+  local template_data_path="$4"
+  local step_path
+
+  step_path="$(dirname "$(dirname "$ca_config")")"
+
+  STEPPATH="$step_path" step ca provisioner update "$name" \
+    --x509-template="$template_path" \
+    --x509-template-data="$template_data_path" \
+    --ca-config="$ca_config" || return 1
 }
 
 # run_step_ca_init CONFIG_DIR CA_NAME DNS_NAMES PROVISIONER_NAME \
@@ -107,15 +240,19 @@ run_step_ca_init() {
 }
 
 # add_idrac_provisioner CA_CONFIG NAME PASSWORD_FILE TEMPLATE_PATH
+#   TEMPLATE_DATA_PATH
 #
 # Adds a JWK provisioner named NAME to the ca.json at CA_CONFIG, then
-# attaches the x509 certificate template at TEMPLATE_PATH to it (used to
-# enforce RSA-only, iDRAC-compatible certificates).
+# attaches the x509 certificate template at TEMPLATE_PATH (and the
+# template data at TEMPLATE_DATA_PATH) to it - see attach_x509_template.
+# TEMPLATE_DATA_PATH is expected to set AllowedKeyTypes to ["RSA"], since
+# iDRAC devices don't support EC/Ed25519 certificates.
 add_idrac_provisioner() {
   local ca_config="$1"
   local name="$2"
   local password_file="$3"
   local template_path="$4"
+  local template_data_path="$5"
   local step_path
 
   step_path="$(dirname "$(dirname "$ca_config")")"
@@ -123,9 +260,7 @@ add_idrac_provisioner() {
   STEPPATH="$step_path" step ca provisioner add "$name" \
     --type=JWK --create --password-file="$password_file" \
     --ca-config="$ca_config" || return 1
-  STEPPATH="$step_path" step ca provisioner update "$name" \
-    --x509-template="$template_path" \
-    --ca-config="$ca_config" || return 1
+  attach_x509_template "$ca_config" "$name" "$template_path" "$template_data_path" || return 1
 }
 
 # add_acme_provisioner CA_CONFIG NAME
@@ -526,10 +661,11 @@ ensure_provisioner_password() {
 # previous run completed (never regenerates/overwrites secrets on a
 # re-run); otherwise resolves the operator-supplied step-root-ca material,
 # ensures the step-server-ca and provisioner-password secrets exist
-# (generating them on first run), and assembles ca.json: step ca init,
-# the idrac/acme provisioners, and the authority policy/claims. Only once
-# all of that has succeeded does it write the completion marker; a run
-# that fails part-way is retried in full on the next pod start.
+# (generating them on first run), and assembles ca.json: step ca init, the
+# idrac/acme provisioners, the server/idrac SAN-filtering x509 templates,
+# and the default cert duration claim. Only once all of that has succeeded
+# does it write the completion marker; a run that fails part-way is
+# retried in full on the next pod start.
 main() {
   local config_dir="${STEP_CONFIG_DIR:-/home/step}"
   local ca_config="$config_dir/config/ca.json"
@@ -545,9 +681,11 @@ main() {
   local acme_provisioner_name="${STEP_ACME_PROVISIONER_NAME:-acme}"
   local allow_dns="${STEP_POLICY_ALLOW_DNS:-}"
   local allow_ip="${STEP_POLICY_ALLOW_IP:-}"
+  local idrac_allowed_key_types="${STEP_IDRAC_ALLOWED_KEY_TYPES:-RSA}"
+  local server_allowed_key_types="${STEP_SERVER_ALLOWED_KEY_TYPES:-}"
   local default_duration="${STEP_DEFAULT_CERT_DURATION:-2160h}"
   local marker
-  local idrac_template_path
+  local script_dir template_path idrac_template_data_path server_template_data_path
   local workdir
   local kubectl_bin
   local server_ca_paths server_ca_crt server_ca_key server_ca_password_file
@@ -604,17 +742,26 @@ main() {
   idrac_password_path="$(ensure_provisioner_password "$kubectl_bin" "$namespace" "$workdir" \
     "$idrac_provisioner_name")" || return 1
 
-  idrac_template_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/idrac-rsa.tpl"
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  template_path="$script_dir/x509-filter.tpl"
+  idrac_template_data_path="$workdir/idrac-template-data.json"
+  server_template_data_path="$workdir/server-template-data.json"
+  build_x509_template_data "$allow_dns" "$allow_ip" "$idrac_allowed_key_types" \
+    "$idrac_template_data_path" || return 1
+  build_x509_template_data "$allow_dns" "$allow_ip" "$server_allowed_key_types" \
+    "$server_template_data_path" || return 1
 
   run_step_ca_init "$config_dir" "$ca_name" "$dns_names" "$server_provisioner_name" \
     "$server_password_path" \
     "$root_crt" "$root_key" "$root_password_file" \
     "$server_ca_crt" "$server_ca_key" "$server_ca_password_file" || return 1
 
+  attach_x509_template "$ca_config" "$server_provisioner_name" \
+    "$template_path" "$server_template_data_path" || return 1
   add_idrac_provisioner "$ca_config" "$idrac_provisioner_name" \
-    "$idrac_password_path" "$idrac_template_path" || return 1
+    "$idrac_password_path" "$template_path" "$idrac_template_data_path" || return 1
   add_acme_provisioner "$ca_config" "$acme_provisioner_name" || return 1
-  apply_authority_policy "$ca_config" "$allow_dns" "$allow_ip" "$default_duration" || return 1
+  set_default_cert_duration "$ca_config" "$default_duration" || return 1
 
   touch "$marker" || return 1
 }
