@@ -35,9 +35,14 @@ external secret store.
 ## Initialization process
 
 `step ca init` runs in an initContainer on the step-ca pod itself, not a
-separate Job. It is idempotent (skipped if `ca.json` already exists on the
-`step-data` volume), so it is safe to run on every pod start, including
-rollouts, reschedules, and node evictions.
+separate Job. It is idempotent: it is skipped only if a completion marker
+file exists on the `step-data` volume, written as the last step after
+`step ca init` and every provisioner/policy configuration step has
+succeeded. If a previous run failed partway through, the marker is absent,
+so the initContainer wipes any partial state and runs the whole sequence
+again from scratch. This makes it safe to run on every pod start, including
+rollouts, reschedules, and node evictions, without ever leaving step-ca
+serving with incomplete provisioners or policy.
 
 Running it as an initContainer rather than a separate Job avoids needing to
 coordinate access to the `step-data` PVC: since `step-data` is
@@ -64,15 +69,16 @@ The root CA key and its password are only ever needed for two things:
   lost or recreated).
 
 Because the initContainer's idempotency check happens before the root key
-or password is ever read, neither needs to remain available once `ca.json`
-exists. Once the Deployment is confirmed healthy with `ca.json` present, an
+or password is ever read, neither needs to remain available once the
+completion marker exists. Once the Deployment is confirmed healthy, an
 operator should replace the `step-root-ca` secret with a cert-only version
 (`tls.crt` only; drop `tls.key` and `password`), so the root key no longer
 exists in-cluster during normal operation.
 
 The full `step-root-ca` secret (with key and password) only needs to be
-restored temporarily for disaster recovery, i.e. if `ca.json` is lost and
-`step ca init` needs to run again.
+restored temporarily for disaster recovery, i.e. if the completion marker
+(or the whole `step-data` volume) is lost and `step ca init` needs to run
+again.
 
 ## Provisioners
 
