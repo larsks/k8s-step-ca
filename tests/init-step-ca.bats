@@ -21,8 +21,9 @@ setup_fake_kubectl() {
   cp "$BATS_TEST_DIRNAME/fixtures/fake-kubectl.sh" "$BATS_TEST_TMPDIR/bin/kubectl"
   chmod +x "$BATS_TEST_TMPDIR/bin/kubectl"
   export FAKE_KUBECTL_SECRETS_DIR="$BATS_TEST_TMPDIR/secrets"
+  export FAKE_KUBECTL_CONFIGMAPS_DIR="$BATS_TEST_TMPDIR/configmaps"
   export FAKE_KUBECTL_LOG="$BATS_TEST_TMPDIR/kubectl.log"
-  mkdir -p "$FAKE_KUBECTL_SECRETS_DIR"
+  mkdir -p "$FAKE_KUBECTL_SECRETS_DIR" "$FAKE_KUBECTL_CONFIGMAPS_DIR"
 }
 
 # generate_test_root: writes a password-protected RSA root key/cert to
@@ -345,6 +346,15 @@ EOF
   [ "$status" -ne 0 ]
 }
 
+@test "root_ca_fingerprint prints the certificate's sha256 fingerprint" {
+  generate_test_root "$BATS_TEST_TMPDIR"
+  local expected
+  expected="$(step certificate fingerprint "$BATS_TEST_TMPDIR/root_ca.crt")"
+  run root_ca_fingerprint "$BATS_TEST_TMPDIR/root_ca.crt"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$expected" ]
+}
+
 @test "fake kubectl mirrors real kubectl's <no value> output for a bare index template" {
   mkdir -p "$BATS_TEST_TMPDIR/secrets/step-server-ca"
   run "$BATS_TEST_TMPDIR/bin/kubectl" -n step-ca get secret step-server-ca \
@@ -582,6 +592,31 @@ EOF
   [ "$output" = "winner-password" ]
 }
 
+@test "create_fingerprint_configmap creates a ConfigMap with the fingerprint, unencoded" {
+  run create_fingerprint_configmap "$BATS_TEST_TMPDIR/bin/kubectl" step-ca \
+    step-root-ca-fingerprint deadbeef
+  [ "$status" -eq 0 ]
+  run cat "$FAKE_KUBECTL_CONFIGMAPS_DIR/step-root-ca-fingerprint/fingerprint"
+  [ "$output" = "deadbeef" ]
+}
+
+@test "create_fingerprint_configmap succeeds when the ConfigMap already exists" {
+  mkdir -p "$FAKE_KUBECTL_CONFIGMAPS_DIR/step-root-ca-fingerprint"
+  echo -n deadbeef >"$FAKE_KUBECTL_CONFIGMAPS_DIR/step-root-ca-fingerprint/fingerprint"
+  run create_fingerprint_configmap "$BATS_TEST_TMPDIR/bin/kubectl" step-ca \
+    step-root-ca-fingerprint deadbeef
+  [ "$status" -eq 0 ]
+}
+
+@test "create_fingerprint_configmap does not collide with a same-named Secret" {
+  mkdir -p "$FAKE_KUBECTL_SECRETS_DIR/step-root-ca-fingerprint"
+  run create_fingerprint_configmap "$BATS_TEST_TMPDIR/bin/kubectl" step-ca \
+    step-root-ca-fingerprint deadbeef
+  [ "$status" -eq 0 ]
+  run cat "$FAKE_KUBECTL_CONFIGMAPS_DIR/step-root-ca-fingerprint/fingerprint"
+  [ "$output" = "deadbeef" ]
+}
+
 @test "fetch_kubectl downloads and verifies kubectl" {
   setup_fake_curl
   PATH="$BATS_TEST_TMPDIR/curlbin:$PATH" run --separate-stderr fetch_kubectl "$BATS_TEST_TMPDIR/work"
@@ -620,23 +655,45 @@ EOF
   [ ! -x "$BATS_TEST_TMPDIR/work/kubectl" ]
 }
 
-@test "main exits 0 immediately when the completion marker exists, without touching secrets" {
-  mkdir -p "$BATS_TEST_TMPDIR/config/config"
+@test "main publishes the fingerprint but touches no other secrets when the completion marker exists" {
+  mkdir -p "$BATS_TEST_TMPDIR/config/config" "$BATS_TEST_TMPDIR/root-ca"
   touch "$BATS_TEST_TMPDIR/config/config/ca.json"
   touch "$(init_marker "$BATS_TEST_TMPDIR/config")"
-  STEP_CONFIG_DIR="$BATS_TEST_TMPDIR/config" run main
+  generate_test_root "$BATS_TEST_TMPDIR"
+  cp "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root-ca/tls.crt" # tls.key/password deliberately absent, as after the documented post-init secret swap
+  local expected
+  expected="$(step certificate fingerprint "$BATS_TEST_TMPDIR/root-ca/tls.crt")"
+  STEP_CONFIG_DIR="$BATS_TEST_TMPDIR/config" STEP_ROOT_CA_DIR="$BATS_TEST_TMPDIR/root-ca" NAMESPACE=step-ca run main
   [ "$status" -eq 0 ]
+  run cat "$BATS_TEST_TMPDIR/configmaps/step-root-ca-fingerprint/fingerprint"
+  [ "$output" = "$expected" ]
+  [ ! -d "$BATS_TEST_TMPDIR/secrets/step-server-ca" ]
+  [ ! -d "$BATS_TEST_TMPDIR/secrets/step-provisioner-server" ]
+  [ ! -d "$BATS_TEST_TMPDIR/secrets/step-provisioner-idrac" ]
+}
+
+@test "main fails with a clear message when the root certificate itself is unavailable" {
+  mkdir -p "$BATS_TEST_TMPDIR/config"
+  mkdir -p "$BATS_TEST_TMPDIR/root-ca" # tls.crt deliberately absent
+  STEP_CONFIG_DIR="$BATS_TEST_TMPDIR/config" STEP_ROOT_CA_DIR="$BATS_TEST_TMPDIR/root-ca" NAMESPACE=step-ca run main
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"restore"*"step-root-ca"* ]]
   [ ! -f "$BATS_TEST_TMPDIR/kubectl.log" ]
 }
 
 @test "main fails with a clear message when not initialized and the root key is unavailable" {
   mkdir -p "$BATS_TEST_TMPDIR/config"
   mkdir -p "$BATS_TEST_TMPDIR/root-ca"
-  echo "cert-only" >"$BATS_TEST_TMPDIR/root-ca/tls.crt" # tls.key/password deliberately absent
-  STEP_CONFIG_DIR="$BATS_TEST_TMPDIR/config" STEP_ROOT_CA_DIR="$BATS_TEST_TMPDIR/root-ca" run main
+  generate_test_root "$BATS_TEST_TMPDIR"
+  cp "$BATS_TEST_TMPDIR/root_ca.crt" "$BATS_TEST_TMPDIR/root-ca/tls.crt" # tls.key/password deliberately absent
+  STEP_CONFIG_DIR="$BATS_TEST_TMPDIR/config" STEP_ROOT_CA_DIR="$BATS_TEST_TMPDIR/root-ca" NAMESPACE=step-ca run main
   [ "$status" -ne 0 ]
   [[ "$output" == *"restore"*"step-root-ca"* ]]
-  [ ! -f "$BATS_TEST_TMPDIR/kubectl.log" ]
+  [ ! -d "$BATS_TEST_TMPDIR/secrets/step-server-ca" ]
+  # The fingerprint only needs tls.crt, which is present here, so it's
+  # still published even though the rest of initialization fails.
+  run cat "$BATS_TEST_TMPDIR/configmaps/step-root-ca-fingerprint/fingerprint"
+  [ -n "$output" ]
 }
 
 @test "main fails with a clear message when step-root-ca is not RSA, before touching secrets or step ca init" {
@@ -647,7 +704,7 @@ EOF
   run main
   [ "$status" -ne 0 ]
   [[ "$output" == *"not an RSA certificate"* ]]
-  [ ! -f "$BATS_TEST_TMPDIR/kubectl.log" ]
+  [ ! -d "$BATS_TEST_TMPDIR/secrets/step-server-ca" ]
   [ ! -e "$BATS_TEST_TMPDIR/config/config/ca.json" ]
 }
 
@@ -681,6 +738,23 @@ EOF
   [ "$status" -eq 0 ]
   [ -s "$BATS_TEST_TMPDIR/secrets/step-provisioner-server/password" ]
   [ -s "$BATS_TEST_TMPDIR/secrets/step-provisioner-idrac/password" ]
+}
+
+@test "main publishes the root CA's fingerprint to a ConfigMap" {
+  setup_main_env
+  local expected
+  expected="$(step certificate fingerprint "$BATS_TEST_TMPDIR/root_ca.crt")"
+  run main
+  [ "$status" -eq 0 ]
+  run cat "$BATS_TEST_TMPDIR/configmaps/step-root-ca-fingerprint/fingerprint"
+  [ "$output" = "$expected" ]
+}
+
+@test "main uses STEP_ROOT_CA_FINGERPRINT_CONFIGMAP for the ConfigMap name" {
+  setup_main_env
+  STEP_ROOT_CA_FINGERPRINT_CONFIGMAP=custom-fingerprint-name run main
+  [ "$status" -eq 0 ]
+  [ -d "$BATS_TEST_TMPDIR/configmaps/custom-fingerprint-name" ]
 }
 
 @test "main uses the default server CA name when STEP_SERVER_CA_NAME is unset" {

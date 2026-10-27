@@ -19,19 +19,25 @@
 #   --ignore-not-found is given, in which case it prints nothing and exits
 #   0. If $FAKE_KUBECTL_GET_FAILS is set, every `get` fails as if the API
 #   were unreachable.
-# - `apply -f -` and `create -f -` both read a Secret manifest from stdin,
-#   in exactly the shape this script's own init-step-ca.sh produces (a
-#   top-level `metadata.name` and a top-level `data:` map of
-#   `key: base64value` pairs), and base64-decode each value into
-#   $FAKE_KUBECTL_SECRETS_DIR/<name>/<key>. `create` additionally mirrors
-#   real kubectl's refusal to overwrite an existing secret: if the named
-#   secret's directory already exists, it prints an AlreadyExists error
-#   and exits 1 without touching anything, instead of writing the fields.
+# - `apply -f -` and `create -f -` both read a Secret or ConfigMap
+#   manifest from stdin, in exactly the shape this script's own
+#   init-step-ca.sh produces (a top-level `metadata.name` and a top-level
+#   `data:` map of `key: value` pairs). For a Secret, each value is
+#   base64 (matching the real API object) and is decoded before being
+#   written to $FAKE_KUBECTL_SECRETS_DIR/<name>/<key>; for a ConfigMap,
+#   each value is plain text (matching the real API object - unlike
+#   Secret, ConfigMap's `data` is not base64) and is written as-is to
+#   $FAKE_KUBECTL_CONFIGMAPS_DIR/<name>/<key>. `create` additionally
+#   mirrors real kubectl's refusal to overwrite an existing object: if
+#   the named Secret/ConfigMap's directory already exists, it prints an
+#   AlreadyExists error and exits 1 without touching anything, instead of
+#   writing the fields.
 #
 # Every invocation's arguments are appended to $FAKE_KUBECTL_LOG, if set.
 set -euo pipefail
 
 : "${FAKE_KUBECTL_SECRETS_DIR:?FAKE_KUBECTL_SECRETS_DIR must be set}"
+: "${FAKE_KUBECTL_CONFIGMAPS_DIR:=$FAKE_KUBECTL_SECRETS_DIR-configmaps}"
 
 if [[ -n "${FAKE_KUBECTL_LOG:-}" ]]; then
   printf '%s\n' "$*" >>"$FAKE_KUBECTL_LOG"
@@ -99,9 +105,14 @@ apply | create)
   # apply -f - / create -f -
   verb="$1"
   name=""
+  kind=""
   in_data=0
   declare -A fields=()
   while IFS= read -r line; do
+    if [[ -z "$kind" && "$line" =~ ^kind:[[:space:]]*(.+)$ ]]; then
+      kind="${BASH_REMATCH[1]}"
+      continue
+    fi
     if [[ -z "$name" && "$line" =~ ^[[:space:]]{2}name:[[:space:]]*(.+)$ ]]; then
       name="${BASH_REMATCH[1]}"
       continue
@@ -111,7 +122,7 @@ apply | create)
       continue
     fi
     if [[ $in_data -eq 1 ]]; then
-      if [[ "$line" =~ ^[[:space:]]{2}([A-Za-z0-9._-]+):[[:space:]]*(.*)$ ]]; then
+      if [[ "$line" =~ ^[[:space:]]{2}([A-Za-z0-9._-]+):[[:space:]]*\"?([^\"]*)\"?$ ]]; then
         fields["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
         continue
       fi
@@ -124,19 +135,40 @@ apply | create)
     exit 1
   }
 
-  if [[ "$verb" == "create" && -d "$FAKE_KUBECTL_SECRETS_DIR/$name" ]]; then
-    echo "Error from server (AlreadyExists): error when creating \"STDIN\": secrets \"$name\" already exists" >&2
+  case "$kind" in
+  ConfigMap)
+    resource=configmap
+    plural=configmaps
+    store_dir="$FAKE_KUBECTL_CONFIGMAPS_DIR"
+    ;;
+  Secret | "")
+    resource=secret
+    plural=secrets
+    store_dir="$FAKE_KUBECTL_SECRETS_DIR"
+    ;;
+  *)
+    echo "fake-kubectl: unsupported kind: $kind" >&2
+    exit 1
+    ;;
+  esac
+
+  if [[ "$verb" == "create" && -d "$store_dir/$name" ]]; then
+    echo "Error from server (AlreadyExists): error when creating \"STDIN\": $plural \"$name\" already exists" >&2
     exit 1
   fi
 
-  mkdir -p "$FAKE_KUBECTL_SECRETS_DIR/$name"
+  mkdir -p "$store_dir/$name"
   for key in "${!fields[@]}"; do
-    printf '%s' "${fields[$key]}" | base64 -d >"$FAKE_KUBECTL_SECRETS_DIR/$name/$key"
+    if [[ "$resource" == "secret" ]]; then
+      printf '%s' "${fields[$key]}" | base64 -d >"$store_dir/$name/$key"
+    else
+      printf '%s' "${fields[$key]}" >"$store_dir/$name/$key"
+    fi
   done
   if [[ "$verb" == "create" ]]; then
-    echo "secret/$name created"
+    echo "$resource/$name created"
   else
-    echo "secret/$name configured"
+    echo "$resource/$name configured"
   fi
   ;;
 *)

@@ -28,6 +28,15 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["create"]
+  # The step-ca-init initContainer also publishes the step-root-ca
+  # fingerprint to a ConfigMap (create_fingerprint_configmap), for
+  # clients bootstrapping against this CA without their own cluster API
+  # access. create-only, namespace-wide, for the same reason as the
+  # Secret create rule above; nothing gets, lists, updates, or patches
+  # ConfigMaps.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

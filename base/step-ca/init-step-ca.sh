@@ -499,6 +499,64 @@ EOF
   fi
 }
 
+# root_ca_fingerprint ROOT_CRT
+#
+# Prints the sha256 fingerprint of the certificate at ROOT_CRT, in the
+# same hex form `step ca bootstrap --fingerprint` expects.
+root_ca_fingerprint() {
+  local root_crt="$1"
+
+  step certificate fingerprint "$root_crt"
+}
+
+# create_fingerprint_configmap KUBECTL NAMESPACE NAME FINGERPRINT
+#
+# Creates a ConfigMap named NAME with a single "fingerprint" key set to
+# FINGERPRINT, for clients that bootstrap against this CA (e.g. `step ca
+# bootstrap --fingerprint`/--team-url) without cluster API access of
+# their own - see fetch_kubectl's docstring for why this script can't
+# assume kubectl is already on PATH, and the webserver/ingress fronting
+# this ConfigMap is out of scope here.
+#
+# Uses `kubectl create`, not `apply`, for the same race-detection reason
+# as create_tls_secret/create_opaque_secret. Unlike those, a losing race
+# is treated as success rather than adopted: the fingerprint is wholly
+# determined by ROOT_CRT, so whatever a concurrently running init already
+# wrote is the same value this one would have written. Returns:
+#
+#   0 - created, or already existed (necessarily with the same value)
+#   1 - the create failed for a reason other than already existing; a
+#       message is printed to stderr
+create_fingerprint_configmap() {
+  local kubectl_bin="$1"
+  local namespace="$2"
+  local name="$3"
+  local fingerprint="$4"
+  local err rc
+
+  err="$(
+    cat <<EOF | "$kubectl_bin" create -f - 2>&1 1>/dev/null
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: $name
+  namespace: $namespace
+data:
+  fingerprint: "$fingerprint"
+EOF
+  )"
+  rc=$?
+
+  if ((rc == 0)); then
+    return 0
+  elif [[ "$err" == *AlreadyExists* ]]; then
+    return 0
+  else
+    echo "$err" >&2
+    return 1
+  fi
+}
+
 # ensure_server_ca KUBECTL NAMESPACE WORKDIR ROOT_CRT ROOT_KEY ROOT_PASSWORD_FILE
 #   SERVER_CA_NAME
 #
@@ -661,15 +719,26 @@ ensure_provisioner_password() {
 
 # main
 #
-# Entry point for the step-ca-init initContainer. Short-circuits if a
-# previous run completed (never regenerates/overwrites secrets on a
-# re-run); otherwise resolves the operator-supplied step-root-ca material,
-# ensures the step-server-ca and provisioner-password secrets exist
-# (generating them on first run), and assembles ca.json: step ca init, the
-# idrac/acme provisioners, the server/idrac SAN-filtering x509 templates,
-# and the default cert duration claim. Only once all of that has succeeded
-# does it write the completion marker; a run that fails part-way is
-# retried in full on the next pod start.
+# Entry point for the step-ca-init initContainer. Every run - whether or
+# not step-ca was already initialized - (re-)publishes the step-root-ca
+# fingerprint to a ConfigMap (idempotently: create_fingerprint_configmap
+# treats "already exists" as success), since that's cheap, has no
+# generated secrets to protect from being overwritten, and should recover
+# on its own if the ConfigMap is ever deleted. It only needs tls.crt,
+# which - unlike tls.key/password - is expected to remain in step-root-ca
+# for the life of the CA (see step-ca-init.md's documented post-init
+# secret swap), so this works whether or not step-ca was already
+# initialized.
+#
+# Short-circuits the rest of initialization if a previous run completed
+# (never regenerates/overwrites secrets on a re-run); otherwise resolves
+# the remaining operator-supplied step-root-ca material, ensures the
+# step-server-ca and provisioner-password secrets exist (generating them
+# on first run), and assembles ca.json: step ca init, the idrac/acme
+# provisioners, the server/idrac SAN-filtering x509 templates, and the
+# default cert duration claim. Only once all of that has succeeded does
+# it write the completion marker; a run that fails part-way is retried in
+# full on the next pod start.
 main() {
   local config_dir="${STEP_CONFIG_DIR:-/home/step}"
   local ca_config="$config_dir/config/ca.json"
@@ -689,6 +758,8 @@ main() {
   local idrac_allowed_key_types="${STEP_IDRAC_ALLOWED_KEY_TYPES:-RSA}"
   local server_allowed_key_types="${STEP_SERVER_ALLOWED_KEY_TYPES:-}"
   local default_duration="${STEP_DEFAULT_CERT_DURATION:-2160h}"
+  local fingerprint_configmap_name="${STEP_ROOT_CA_FINGERPRINT_CONFIGMAP:-step-root-ca-fingerprint}"
+  local fingerprint
   local marker
   local script_dir template_path idrac_template_data_path server_template_data_path
   local workdir
@@ -698,29 +769,13 @@ main() {
 
   marker="$(init_marker "$config_dir")"
 
-  if ca_already_initialized "$config_dir"; then
-    echo "step-ca already initialized ($marker exists) - skipping initialization" >&2
-    return 0
-  fi
-
-  if [[ -f "$ca_config" ]]; then
-    echo "$ca_config exists but $marker does not - a previous initialization" \
-      "did not complete; re-initializing from scratch" >&2
-  fi
-
-  # Checked before requiring NAMESPACE or fetching kubectl: an operator
-  # restoring step-root-ca is the thing this failure is actually about,
-  # and we want the message about that to win over any other missing
-  # prerequisite.
-  if [[ ! -f "$root_crt" ]] || [[ ! -f "$root_key" ]] || [[ ! -f "$root_password_file" ]]; then
-    echo "step-root-ca secret is missing tls.crt, tls.key or password at $root_ca_dir -" \
+  # tls.crt must always be present (see the main() docstring); checked
+  # before requiring NAMESPACE or fetching kubectl so a missing root
+  # certificate is reported on its own, rather than as a confusing
+  # NAMESPACE-is-unset failure.
+  if [[ ! -f "$root_crt" ]]; then
+    echo "step-root-ca secret is missing tls.crt at $root_ca_dir -" \
       "restore step-root-ca from backup before retrying" >&2
-    return 1
-  fi
-
-  if ! root_is_rsa "$root_crt"; then
-    echo "step-root-ca tls.crt at $root_crt is not an RSA certificate -" \
-      "Dell iDRAC 8 requires an all-RSA trust chain, so step-root-ca must be RSA" >&2
     return 1
   fi
 
@@ -733,6 +788,35 @@ main() {
   trap "rm -rf $(printf '%q' "$workdir")" EXIT
 
   kubectl_bin="$(fetch_kubectl "$workdir")" || return 1
+
+  fingerprint="$(root_ca_fingerprint "$root_crt")" || return 1
+  create_fingerprint_configmap "$kubectl_bin" "$namespace" \
+    "$fingerprint_configmap_name" "$fingerprint" || return 1
+
+  if ca_already_initialized "$config_dir"; then
+    echo "step-ca already initialized ($marker exists) - skipping initialization" >&2
+    return 0
+  fi
+
+  if [[ -f "$ca_config" ]]; then
+    echo "$ca_config exists but $marker does not - a previous initialization" \
+      "did not complete; re-initializing from scratch" >&2
+  fi
+
+  # tls.key/password may legitimately be absent at this point if step-ca
+  # was already initialized (see above) - but it wasn't, so the operator
+  # hasn't finished provisioning step-root-ca yet.
+  if [[ ! -f "$root_key" ]] || [[ ! -f "$root_password_file" ]]; then
+    echo "step-root-ca secret is missing tls.key or password at $root_ca_dir -" \
+      "restore step-root-ca from backup before retrying" >&2
+    return 1
+  fi
+
+  if ! root_is_rsa "$root_crt"; then
+    echo "step-root-ca tls.crt at $root_crt is not an RSA certificate -" \
+      "Dell iDRAC 8 requires an all-RSA trust chain, so step-root-ca must be RSA" >&2
+    return 1
+  fi
 
   server_ca_paths="$(ensure_server_ca "$kubectl_bin" "$namespace" "$workdir" \
     "$root_crt" "$root_key" "$root_password_file" "$server_ca_name")" || return 1
